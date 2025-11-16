@@ -74,6 +74,9 @@ public class UnifiedDistributedScheduler {
     private final ScheduledExecutorService schedulerExecutor = Executors.newScheduledThreadPool(10);
     private final Map<Long, Future<?>> runningTasks = new ConcurrentHashMap<>();
     private final Map<Long, TaskScheduler> registeredTasks = new ConcurrentHashMap<>();
+    
+    // 节点ID（应用启动时生成一次，保持不变）
+    private String nodeId;
 
     // Redis键前缀
     private static final String TASK_LOCK_KEY = "efak:unified:scheduler:lock";
@@ -94,6 +97,10 @@ public class UnifiedDistributedScheduler {
     public void init() {
 
         try {
+            // 生成节点ID（只生成一次）
+            this.nodeId = generateNodeId();
+            log.info("当前节点ID: {}", nodeId);
+            
             // 初始化分布式任务协调器
             taskCoordinator.initializeNode();
 
@@ -716,9 +723,9 @@ public class UnifiedDistributedScheduler {
     }
 
     /**
-     * 获取当前节点ID
+     * 生成节点ID（只在应用启动时调用一次）
      */
-    private String getCurrentNodeId() {
+    private String generateNodeId() {
         try {
             // 获取应用名称
             String applicationName = environment.getProperty("spring.application.name", "efak-ai");
@@ -726,15 +733,22 @@ public class UnifiedDistributedScheduler {
             // 获取IP地址
             String ipAddress = java.net.InetAddress.getLocalHost().getHostAddress();
 
-            // 获取当前时间戳，格式为yyyyMMddHHmmss
+            // 使用应用启动时间戳（而不是当前时间）
             String timestamp = LocalDateTime.now()
                     .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
 
             return applicationName + "-" + ipAddress + "-" + serverPort + "-" + timestamp;
         } catch (Exception e) {
-            log.warn("获取节点ID失败，使用默认格式: {}", e.getMessage());
+            log.warn("生成节点ID失败，使用默认格式: {}", e.getMessage());
             return "efak-ai-unknown-" + System.currentTimeMillis();
         }
+    }
+    
+    /**
+     * 获取当前节点ID（返回启动时生成的固定ID）
+     */
+    private String getCurrentNodeId() {
+        return nodeId;
     }
 
     /**
