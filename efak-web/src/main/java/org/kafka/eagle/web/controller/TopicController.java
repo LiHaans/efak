@@ -157,10 +157,13 @@ public class TopicController {
     public ResponseEntity<Map<String, Object>> getTopicBasicInfo(
             @PathVariable String topicName,
             @RequestParam(value = "clusterId", required = false) String clusterId) {
+        long startTime = System.currentTimeMillis();
         Map<String, Object> result = new HashMap<>();
 
         try {
+            long step1 = System.currentTimeMillis();
             TopicInfo topicInfo = topicService.getTopicByNameAndCluster(topicName, clusterId);
+            log.info("[性能监控] getTopicByNameAndCluster耗时: {}ms", System.currentTimeMillis() - step1);
 
             if (topicInfo != null) {
                 result.put("success", true);
@@ -172,7 +175,9 @@ public class TopicController {
                 data.put("clusterId", topicInfo.getClusterId());
 
                 // 获取真实的统计数据
+                long step2 = System.currentTimeMillis();
                 Map<String, Object> detailedStats = topicService.getTopicDetailedStats(topicName, clusterId);
+                log.info("[性能监控] getTopicDetailedStats耗时: {}ms", System.currentTimeMillis() - step2);
                 data.put("totalRecords", detailedStats.get("totalRecords"));
                 data.put("totalSize", detailedStats.get("totalSize"));
                 data.put("writeSpeed", detailedStats.get("writeSpeed"));
@@ -184,6 +189,7 @@ public class TopicController {
                 result.put("message", "主题不存在");
             }
 
+            log.info("[性能监控] /api/info/{} 总耗时: {}ms", topicName, System.currentTimeMillis() - startTime);
             return ResponseEntity.ok(result);
 
         } catch (Exception e) {
@@ -271,6 +277,7 @@ public class TopicController {
             @RequestParam(value = "clusterId", required = false) String clusterId,
             @RequestParam(value = "start", required = false, defaultValue = "0") Integer start,
             @RequestParam(value = "length", required = false, defaultValue = "10") Integer length) {
+        long startTime = System.currentTimeMillis();
         Map<String, Object> result = new HashMap<>();
         try {
             // 构建分页参数
@@ -285,6 +292,7 @@ public class TopicController {
             result.put("data", pageResult.get("records"));
             result.put("total", pageResult.get("total"));
 
+            log.info("[性能监控] /api/partitions/{} 总耗时: {}ms", topicName, System.currentTimeMillis() - startTime);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             log.error("获取Topic分区信息失败：{}", e.getMessage(), e);
@@ -303,6 +311,7 @@ public class TopicController {
             @PathVariable String topicName,
             @RequestParam(value = "clusterId", required = false) String clusterId,
             @RequestParam(value = "timeRange", required = false, defaultValue = "1d") String timeRange) {
+        long startTime = System.currentTimeMillis();
         Map<String, Object> result = new HashMap<>();
         try {
 
@@ -311,6 +320,7 @@ public class TopicController {
 
             result.put("success", true);
             result.put("data", flowData);
+            log.info("[性能监控] /api/flow/{} 总耗时: {}ms", topicName, System.currentTimeMillis() - startTime);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             log.error("获取Topic消息流量失败：{}", e.getMessage(), e);
@@ -331,11 +341,13 @@ public class TopicController {
             @RequestParam(value = "page", required = false, defaultValue = "1") Integer page,
             @RequestParam(value = "pageSize", required = false, defaultValue = "5") Integer pageSize) {
 
+        long startTime = System.currentTimeMillis();
         Map<String, Object> result = new HashMap<>();
         try {
             Map<String, Object> consumerGroupsData = topicService.getTopicConsumerGroups(topicName, clusterId, page, pageSize);
             result.put("success", true);
             result.putAll(consumerGroupsData);
+            log.info("[性能监控] /api/consumer-groups/{} 总耗时: {}ms", topicName, System.currentTimeMillis() - startTime);
             return ResponseEntity.ok(result);
 
         } catch (Exception e) {
@@ -359,6 +371,7 @@ public class TopicController {
     public ResponseEntity<Map<String, Object>> getTopicConfig(
             @PathVariable String topicName,
             @RequestParam(value = "clusterId", required = false) String clusterId) {
+        long startTime = System.currentTimeMillis();
         Map<String, Object> result = new HashMap<>();
         try {
 
@@ -367,6 +380,7 @@ public class TopicController {
 
             result.put("success", true);
             result.put("data", topicConfig);
+            log.info("[性能监控] /api/config/{} 总耗时: {}ms", topicName, System.currentTimeMillis() - startTime);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             log.error("获取Topic配置信息失败：{}", e.getMessage(), e);
