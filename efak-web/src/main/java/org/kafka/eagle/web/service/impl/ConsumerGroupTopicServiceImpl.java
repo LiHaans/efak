@@ -117,16 +117,23 @@ public class ConsumerGroupTopicServiceImpl implements ConsumerGroupTopicService 
                 }
             }
 
+            log.info("执行批量插入，数据量: {}", requests.size());
             int result = consumerGroupTopicMapper.batchInsertConsumerGroupTopic(requests);
+            log.info("批量插入结果: 影响行数={}", result);
             if (result > 0) {
                 return true;
             } else {
-                log.error("批量插入消费者组主题数据失败：数据库操作返回0");
+                log.error("批量插入失败：数据库操作返回0，期望影响 {} 行", requests.size());
                 return false;
             }
 
         } catch (Exception e) {
-            log.error("批量插入消费者组主题数据失败：{}", e.getMessage(), e);
+            log.error("批量插入异常，数据量={}，详细错误: {}", requests.size(), e.getMessage(), e);
+            // 打印第一条数据用于调试
+            if (!requests.isEmpty()) {
+                log.error("第一条数据样本: cluster={}, group={}, topic={}",
+                        requests.get(0).getClusterId(), requests.get(0).getGroupId(), requests.get(0).getTopicName());
+            }
             return false;
         }
     }

@@ -2049,8 +2049,11 @@ public class TaskExecutorManager {
         int savedCount = 0;
 
         if (consumerGroupTopicInfos == null || consumerGroupTopicInfos.isEmpty()) {
+            log.warn("消费者组主题信息为空，跳过保存");
             return savedCount;
         }
+
+        log.info("开始保存消费者组数据到数据库，数量: {}", consumerGroupTopicInfos.size());
 
         try {
             // 准备批量插入的数据
@@ -2080,13 +2083,26 @@ public class TaskExecutorManager {
             }
 
             if (!insertRequests.isEmpty()) {
+                log.info("准备批量插入 {} 条记录", insertRequests.size());
+                
+                // 打印前3条数据样本
+                for (int i = 0; i < Math.min(3, insertRequests.size()); i++) {
+                    var req = insertRequests.get(i);
+                    log.info("样本[{}]: cluster={}, group={}, topic={}, lags={}, collectTime={}", 
+                        i, req.getClusterId(), req.getGroupId(), req.getTopicName(), 
+                        req.getLags(), req.getCollectTime());
+                }
+                
                 // 使用注入的 ConsumerGroupTopicService 进行批量插入
                 boolean success = consumerGroupTopicService.batchInsertConsumerGroupTopic(insertRequests);
                 if (success) {
                     savedCount = insertRequests.size();
+                    log.info("成功保存 {} 条消费者组主题数据到数据库", savedCount);
                 } else {
                     log.error("批量保存消费者组主题信息到数据库失败");
                 }
+            } else {
+                log.warn("转换后的插入请求为空，无数据可保存");
             }
 
         } catch (Exception e) {
