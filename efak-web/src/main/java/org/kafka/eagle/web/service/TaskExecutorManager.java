@@ -706,13 +706,9 @@ public class TaskExecutorManager {
                             .orElse("default"); // 默认集群ID
                     metrics.setClusterId(clusterId);
 
-                    // 转换CPU和内存使用率为BigDecimal
-                    if (broker.getCpuUsagePercent() != 0.0) {
-                        metrics.setCpuUsage(BigDecimal.valueOf(broker.getCpuUsagePercent()));
-                    }
-                    if (broker.getMemoryUsagePercent() != 0.0) {
-                        metrics.setMemoryUsage(BigDecimal.valueOf(broker.getMemoryUsagePercent()));
-                    }
+                    // 转换CPU和内存使用率为BigDecimal（包括0值，0是有效的性能指标）
+                    metrics.setCpuUsage(BigDecimal.valueOf(broker.getCpuUsagePercent()));
+                    metrics.setMemoryUsage(BigDecimal.valueOf(broker.getMemoryUsagePercent()));
 
                     LocalDateTime now = LocalDateTime.now();
                     metrics.setCollectTime(now);

@@ -460,26 +460,9 @@ public class TopicServiceImpl implements TopicService {
         }
     }
 
-    // 简单的内存缓存，避免频繁查询Kafka
-    private final Map<String, Map<String, Object>> topicStatsCache = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<String, Long> topicStatsCacheTime = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final long CACHE_TTL_MS = 30000; // 30秒缓存
-
     @Override
     public Map<String, Object> getTopicDetailedStats(String topicName, String clusterId) {
         long startTime = System.currentTimeMillis();
-        String cacheKey = clusterId + "_" + topicName;
-        
-        // 检查缓存
-        Long cacheTime = topicStatsCacheTime.get(cacheKey);
-        if (cacheTime != null && (System.currentTimeMillis() - cacheTime) < CACHE_TTL_MS) {
-            Map<String, Object> cachedStats = topicStatsCache.get(cacheKey);
-            if (cachedStats != null) {
-                log.info("[性能优化] 使用缓存数据，topic={}, 耗时={}ms", topicName, System.currentTimeMillis() - startTime);
-                return cachedStats;
-            }
-        }
-        
         Map<String, Object> stats = new HashMap<>();
         stats.put("totalRecords", 0L);
         stats.put("totalSize", 0L);
@@ -502,7 +485,6 @@ public class TopicServiceImpl implements TopicService {
                     return stats;
                 }
             }
-            log.info("[性能监控] getBrokersByClusterId耗时: {}ms", System.currentTimeMillis() - step1);
 
             // 创建KafkaClientInfo
             KafkaClientInfo kafkaClientInfo = new KafkaClientInfo();
@@ -519,7 +501,6 @@ public class TopicServiceImpl implements TopicService {
             try {
                 long step2 = System.currentTimeMillis();
                 Long capacity = ksf.getTopicRecordCapacityNum(kafkaClientInfo, brokerInfos, topicName);
-                log.info("[性能监控] getTopicRecordCapacityNum耗时: {}ms", System.currentTimeMillis() - step2);
                 stats.put("totalSize", capacity != null ? capacity : 0L);
             } catch (Exception e) {
                 log.warn("获取主题 {} 记录数失败：{}", topicName, e.getMessage());
@@ -530,7 +511,6 @@ public class TopicServiceImpl implements TopicService {
                 long step3 = System.currentTimeMillis();
                 // totalRecords
                 Long logsize = ksf.getTotalActualTopicLogSize(kafkaClientInfo, topicName);
-                log.info("[性能监控] getTotalActualTopicLogSize耗时: {}ms", System.currentTimeMillis() - step3);
                 stats.put("totalRecords", logsize != null ? logsize : 0L);
             } catch (Exception e) {
                 log.warn("获取主题 {} 大小失败：{}", topicName, e.getMessage());
@@ -540,14 +520,12 @@ public class TopicServiceImpl implements TopicService {
             try {
                 long step4 = System.currentTimeMillis();
                 TopicDetailedStats topicStats = ksf.getTopicMetaData(kafkaClientInfo, topicName);
-                log.info("[性能监控] getTopicMetaData耗时: {}ms", System.currentTimeMillis() - step4);
                 
                 if (topicStats != null && !brokerInfos.isEmpty()) {
                     // 获取写入和读取速度
                     long step5 = System.currentTimeMillis();
                     BigDecimal writeSpeed = getTopicJmxMetric(brokerInfos, topicName, JmxMetricsConst.Server.BYTES_IN_PER_SEC_TOPIC.key());
                     BigDecimal readSpeed = getTopicJmxMetric(brokerInfos, topicName, JmxMetricsConst.Server.BYTES_OUT_PER_SEC_TOPIC.key());
-                    log.info("[性能监控] getTopicJmxMetric(读写速度)耗时: {}ms", System.currentTimeMillis() - step5);
 
                     stats.put("writeSpeed", writeSpeed != null ? writeSpeed.doubleValue() : 0.0);
                     stats.put("readSpeed", readSpeed != null ? readSpeed.doubleValue() : 0.0);
@@ -555,11 +533,7 @@ public class TopicServiceImpl implements TopicService {
             } catch (Exception e) {
                 log.warn("获取主题 {} 元数据失败：{}", topicName, e.getMessage());
             }
-            
-            // 更新缓存
-            topicStatsCache.put(cacheKey, stats);
-            topicStatsCacheTime.put(cacheKey, System.currentTimeMillis());
-            log.info("[性能监控] getTopicDetailedStats总耗时: {}ms (已缓存)", System.currentTimeMillis() - startTime);
+
 
         } catch (Exception e) {
             log.error("获取主题 {} 详细统计信息失败：{}", topicName, e.getMessage(), e);
@@ -716,6 +690,7 @@ public class TopicServiceImpl implements TopicService {
             int validBrokers = 0;
 
             for (BrokerInfo brokerInfo : brokerInfos) {
+                if (brokerInfo.getJmxPort() < 0) continue;
                 try {
                     JMXInitializeInfo jmxInfo = new JMXInitializeInfo();
                     jmxInfo.setBrokerId(String.valueOf(brokerInfo.getBrokerId()));

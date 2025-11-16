@@ -534,6 +534,7 @@ public class KafkaSchemaFactory {
             List<MetadataInfo> metadataInfos = getTopicPartitionMetadata(kafkaClientInfo, topic);
             for (MetadataInfo metadataInfo : metadataInfos) {
                 JMXInitializeInfo initializeInfo = getBrokerJmxRmiOfLeaderId(brokerInfos, metadataInfo.getLeader());
+                if (initializeInfo.getPort() <= 0) return capacity;
                 if (NetUtils.telnet(initializeInfo.getHost(), initializeInfo.getPort())) {
                     initializeInfo.setObjectName(String.format(JmxMetricsConst.Log.SIZE.key(), topic, metadataInfo.getPartitionId()));
                     capacity += KafkaClusterFetcher.fetchTopicRecordCount(initializeInfo);
