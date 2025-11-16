@@ -54,8 +54,11 @@ public class DistributedTaskCoordinator {
      * 初始化当前节点（使用外部提供的nodeId）
      */
     public void initializeNode(String nodeId) {
+        log.info("=== DistributedTaskCoordinator.initializeNode() 被调用 ===");
+        log.info("传入的nodeId: {}", nodeId);
+        log.info("当前currentNodeId: {}", this.currentNodeId);
         this.currentNodeId = nodeId;
-        log.info("DistributedTaskCoordinator使用节点ID: {}", nodeId);
+        log.warn("!!! DistributedTaskCoordinator设置节点ID: {} !!!", nodeId);
         registerService();
     }
     

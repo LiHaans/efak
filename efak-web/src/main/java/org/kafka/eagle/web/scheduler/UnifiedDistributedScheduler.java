@@ -84,6 +84,7 @@ public class UnifiedDistributedScheduler {
     private static final String TASK_STATS_KEY = "efak:unified:scheduler:stats";
     private static final String NODE_REGISTRY_KEY = "efak:unified:nodes";
     private static final String CRON_UPDATE_NOTIFICATION_KEY = "efak:unified:cron:update:";
+    private static final String GLOBAL_NODE_ID_KEY = "efak:unified:global:node:id"; // 全局nodeId存储键
 
     // 支持的任务类型
     private static final List<String> SUPPORTED_TASK_TYPES = List.of(
@@ -98,16 +99,33 @@ public class UnifiedDistributedScheduler {
     public void init() {
 
         try {
-            // 生成或获取节点ID（整个JVM进程只生成一次）
-            if (GLOBAL_NODE_ID == null) {
+            // 生成或获取节点ID（整个JVM进程只生成一次，存储在Redis以支持DevTools热重载）
+            log.info("=== UnifiedDistributedScheduler.init() 被调用 ===");
+            log.info("静态变量GLOBAL_NODE_ID: {}", GLOBAL_NODE_ID);
+            log.info("JVM PID: {}", ProcessHandle.current().pid());
+            
+            // 先尝试从redis读取nodeId
+            String redisNodeId = (String) redisTemplate.opsForValue().get(GLOBAL_NODE_ID_KEY);
+            log.info("Redis中的nodeId: {}", redisNodeId);
+            
+            if (redisNodeId != null && !redisNodeId.isEmpty()) {
+                // 使用Redis中的nodeId（支持热重载）
+                GLOBAL_NODE_ID = redisNodeId;
+                log.info("从redis恢复节点ID: {}", GLOBAL_NODE_ID);
+            } else if (GLOBAL_NODE_ID == null) {
+                // 两者都为null，首次生成
                 synchronized (NODE_ID_LOCK) {
                     if (GLOBAL_NODE_ID == null) {
                         GLOBAL_NODE_ID = generateNodeId();
-                        log.info("首次生成节点ID: {}", GLOBAL_NODE_ID);
+                        // 存储到Redis（永久有效，直到应用重启）
+                        redisTemplate.opsForValue().set(GLOBAL_NODE_ID_KEY, GLOBAL_NODE_ID);
+                        log.warn("!!! 首次生成并存储节点ID: {} !!!", GLOBAL_NODE_ID);
                     }
                 }
             } else {
-                log.info("复用已有节点ID: {}", GLOBAL_NODE_ID);
+                // 静态变量有值但redis没有，同步到redis
+                redisTemplate.opsForValue().set(GLOBAL_NODE_ID_KEY, GLOBAL_NODE_ID);
+                log.info("静态变量有值，同步到Redis: {}", GLOBAL_NODE_ID);
             }
             
             // 初始化分布式任务协调器（传入统一的nodeId）
@@ -160,6 +178,14 @@ public class UnifiedDistributedScheduler {
                 log.info("TimeoutWrapper线程池已关闭");
             } catch (Exception ex) {
                 log.warn("关闭TimeoutWrapper时出现异常", ex);
+            }
+            
+            // 7. 清理Redis中的全局nodeId
+            try {
+                redisTemplate.delete(GLOBAL_NODE_ID_KEY);
+                log.info("已清理Redis中的全局nodeId");
+            } catch (Exception ex) {
+                log.warn("清理Redis nodeId时出现异常", ex);
             }
             
             log.info("统一分布式任务调度器销毁完成");
