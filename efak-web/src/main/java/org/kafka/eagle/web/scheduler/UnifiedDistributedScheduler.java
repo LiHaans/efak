@@ -75,8 +75,9 @@ public class UnifiedDistributedScheduler {
     private final Map<Long, Future<?>> runningTasks = new ConcurrentHashMap<>();
     private final Map<Long, TaskScheduler> registeredTasks = new ConcurrentHashMap<>();
     
-    // 节点ID（应用启动时生成一次，保持不变）
-    private String nodeId;
+    // 节点ID（使用静态变量确保整个JVM进程中唯一，即使bean重建也不变）
+    private static volatile String GLOBAL_NODE_ID = null;
+    private static final Object NODE_ID_LOCK = new Object();
 
     // Redis键前缀
     private static final String TASK_LOCK_KEY = "efak:unified:scheduler:lock";
@@ -97,9 +98,17 @@ public class UnifiedDistributedScheduler {
     public void init() {
 
         try {
-            // 生成节点ID（只生成一次）
-            this.nodeId = generateNodeId();
-            log.info("当前节点ID: {}", nodeId);
+            // 生成或获取节点ID（整个JVM进程只生成一次）
+            if (GLOBAL_NODE_ID == null) {
+                synchronized (NODE_ID_LOCK) {
+                    if (GLOBAL_NODE_ID == null) {
+                        GLOBAL_NODE_ID = generateNodeId();
+                        log.info("首次生成节点ID: {}", GLOBAL_NODE_ID);
+                    }
+                }
+            } else {
+                log.info("复用已有节点ID: {}", GLOBAL_NODE_ID);
+            }
             
             // 初始化分布式任务协调器
             taskCoordinator.initializeNode();
@@ -748,7 +757,7 @@ public class UnifiedDistributedScheduler {
      * 获取当前节点ID（返回启动时生成的固定ID）
      */
     private String getCurrentNodeId() {
-        return nodeId;
+        return GLOBAL_NODE_ID;
     }
 
     /**
