@@ -4,10 +4,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.kafka.eagle.core.api.KafkaStoragePlugin;
 import org.kafka.eagle.core.pool.KafkaClientPool;
 import org.kafka.eagle.core.pool.KafkaClientPoolConfig;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
-import javax.annotation.PreDestroy;
 
 /**
  * Kafka 客户端连接池管理配置类
@@ -19,7 +18,7 @@ import javax.annotation.PreDestroy;
  */
 @Slf4j
 @Configuration
-public class KafkaClientPoolManager {
+public class KafkaClientPoolManager implements DisposableBean {
 
     private KafkaStoragePlugin storagePlugin;
 
@@ -46,8 +45,8 @@ public class KafkaClientPoolManager {
     /**
      * 应用关闭时清理资源
      */
-    @PreDestroy
-    public void destroy() {
+    @Override
+    public void destroy() throws Exception {
         log.info("开始关闭 Kafka 客户端连接池");
         if (storagePlugin != null) {
             storagePlugin.shutdown();
