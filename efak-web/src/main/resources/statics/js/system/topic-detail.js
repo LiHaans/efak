@@ -1175,8 +1175,11 @@ function showNotification(message, type = 'info') {
 
 // 打开发送消息对话框
 function openSendMessageModal() {
+    console.log('调用openSendMessageModal函数');
     const modal = document.getElementById('sendMessageModal');
     const topicName = document.getElementById('topicName').textContent;
+    console.log('modal元素:', modal);
+    console.log('topicName:', topicName);
     
     // 设置主题名称
     document.getElementById('sendTopicName').value = topicName;
