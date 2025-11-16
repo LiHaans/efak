@@ -1196,6 +1196,10 @@ function openSendMessageModal() {
     
     // 显示对话框
     modal.style.display = 'flex';
+    // 添加active类显示modal
+    setTimeout(() => {
+        modal.classList.add('active');
+    }, 10);
     
     // 聚焦到消息内容输入框
     setTimeout(() => {
@@ -1206,7 +1210,12 @@ function openSendMessageModal() {
 // 关闭发送消息对话框
 function closeSendMessageModal() {
     const modal = document.getElementById('sendMessageModal');
-    modal.style.display = 'none';
+    // 移除active类
+    modal.classList.remove('active');
+    // 等待动画结束后隐藏modal
+    setTimeout(() => {
+        modal.style.display = 'none';
+    }, 300);
 }
 
 // 点击遮罩层关闭对话框
