@@ -6,6 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
@@ -21,6 +22,20 @@ import java.util.Map;
 @Slf4j
 @ControllerAdvice
 public class GlobalExceptionHandler {
+
+    /**
+     * 处理静态资源未找到异常 - 降低日志级别
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public Object handleNoResourceFoundException(NoResourceFoundException e, HttpServletRequest request) {
+        // 静态资源404只记录DEBUG级别，避免ERROR日志污染
+        log.debug("静态资源未找到: {}", e.getMessage());
+        
+        // 返回404状态
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+            Map.of("success", false, "error", "Resource not found", "status", 404)
+        );
+    }
 
     /**
      * 处理所有未捕获的异常
