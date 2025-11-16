@@ -110,8 +110,8 @@ public class UnifiedDistributedScheduler {
                 log.info("复用已有节点ID: {}", GLOBAL_NODE_ID);
             }
             
-            // 初始化分布式任务协调器
-            taskCoordinator.initializeNode();
+            // 初始化分布式任务协调器（传入统一的nodeId）
+            taskCoordinator.initializeNode(GLOBAL_NODE_ID);
 
             // 启动任务扫描
             startTaskScanner();

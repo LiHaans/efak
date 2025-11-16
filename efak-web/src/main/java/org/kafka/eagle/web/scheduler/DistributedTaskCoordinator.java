@@ -51,10 +51,11 @@ public class DistributedTaskCoordinator {
     private String currentNodeId;
     
     /**
-     * 初始化当前节点
+     * 初始化当前节点（使用外部提供的nodeId）
      */
-    public void initializeNode() {
-        this.currentNodeId = generateNodeId();
+    public void initializeNode(String nodeId) {
+        this.currentNodeId = nodeId;
+        log.info("DistributedTaskCoordinator使用节点ID: {}", nodeId);
         registerService();
     }
     
