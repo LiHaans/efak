@@ -1,6 +1,8 @@
 package org.kafka.eagle.web.service.impl;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.kafka.eagle.core.pool.KafkaClientPool;
 import org.kafka.eagle.core.util.NetUtils;
 import org.kafka.eagle.dto.broker.BrokerInfo;
 import org.kafka.eagle.dto.cluster.ClusterPageResponse;
@@ -21,12 +23,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ClusterServiceImpl implements ClusterService {
 
     private final ClusterMapper clusterMapper;
     private final BrokerMapper brokerMapper;
+    private final KafkaClientPool kafkaClientPool;
 
     @Override
     public Map<String, Object> getClusterStats() {
@@ -189,6 +193,10 @@ public class ClusterServiceImpl implements ClusterService {
         // 更新集群统计
         clusterMapper.updateSummaryByClusterId(clusterId, totalNodes, onlineNodes, availability);
 
+        // 预热连接池（如果配置了预热）
+        // 这里暂不预热，等待首次使用时再创建
+        log.info("集群 '{}' 已创建，连接池将在首次使用时自动初始化", clusterId);
+
         // 返回创建后的集群信息
         return clusterMapper.findByClusterId(clusterId);
     }
@@ -238,6 +246,15 @@ public class ClusterServiceImpl implements ClusterService {
 
         // 5) 更新汇总统计
         updateSummaryByClusterId(info.getClusterId());
+
+        // 6) 刷新连接池（配置变更，需要重建连接）
+        try {
+            kafkaClientPool.refreshCluster(info.getClusterId());
+            log.info("集群 '{}' 更新后，已刷新连接池", info.getClusterId());
+        } catch (Exception e) {
+            log.error("刷新集群 '{}' 的连接池失败", info.getClusterId(), e);
+        }
+
         return updated;
     }
 
@@ -256,6 +273,15 @@ public class ClusterServiceImpl implements ClusterService {
         KafkaClusterInfo cluster = clusterMapper.findByClusterId(clusterId);
         if (cluster != null) {
             int deletedCluster = clusterMapper.deleteCluster(cluster.getId());
+
+            // 移除连接池中的集群连接
+            try {
+                kafkaClientPool.removeCluster(clusterId);
+                log.info("集群 '{}' 删除后，已移除连接池", clusterId);
+            } catch (Exception e) {
+                log.error("移除集群 '{}' 的连接池失败", clusterId, e);
+            }
+
             return deletedCluster;
         }
         return 0;

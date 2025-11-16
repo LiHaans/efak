@@ -27,6 +27,8 @@ import org.apache.kafka.common.config.SslConfigs;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.kafka.eagle.core.constant.ClusterMetricsConst;
+import org.kafka.eagle.core.pool.KafkaClientPool;
+import org.kafka.eagle.core.pool.KafkaClientPoolConfig;
 import org.kafka.eagle.dto.cluster.KafkaClientInfo;
 
 import java.util.Properties;
@@ -43,10 +45,25 @@ import java.util.Properties;
 public class KafkaStoragePlugin {
     private final KafkaAsyncCloser closer;
     private final Properties props;
+    private final KafkaClientPool clientPool;
 
     public KafkaStoragePlugin() {
         this.props = new Properties();
         this.closer = new KafkaAsyncCloser();
+        // 初始化连接池
+        KafkaClientPoolConfig poolConfig = KafkaClientPoolConfig.defaultConfig();
+        this.clientPool = new KafkaClientPool(poolConfig, this);
+        log.info("KafkaStoragePlugin 已初始化，连接池已启动");
+    }
+
+    /**
+     * 使用自定义配置初始化
+     */
+    public KafkaStoragePlugin(KafkaClientPoolConfig poolConfig) {
+        this.props = new Properties();
+        this.closer = new KafkaAsyncCloser();
+        this.clientPool = new KafkaClientPool(poolConfig, this);
+        log.info("KafkaStoragePlugin 已初始化（自定义配置），连接池已启动");
     }
 
     /* ======================= CLIENT CONFIGURATION ======================= */
@@ -142,5 +159,25 @@ public class KafkaStoragePlugin {
     /** 注册资源以进行异步关闭 */
     public void registerResourceForClose(AutoCloseable resource) {
         this.closer.close(resource);
+    }
+
+    /* ======================= CONNECTION POOL MANAGEMENT ======================= */
+
+    /**
+     * 获取连接池实例
+     */
+    public KafkaClientPool getClientPool() {
+        return clientPool;
+    }
+
+    /**
+     * 关闭连接池和资源
+     */
+    public void shutdown() {
+        log.info("开始关闭 KafkaStoragePlugin");
+        if (clientPool != null) {
+            clientPool.shutdown();
+        }
+        log.info("KafkaStoragePlugin 已关闭");
     }
 }

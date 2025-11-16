@@ -37,6 +37,8 @@ import org.kafka.eagle.core.constant.ClusterMetricsConst;
 import org.kafka.eagle.core.constant.ConsumerGroupConst;
 import org.kafka.eagle.core.constant.JmxMetricsConst;
 import org.kafka.eagle.core.dto.ConsumerGroupDescInfo;
+import org.kafka.eagle.core.pool.KafkaClientPool;
+import org.kafka.eagle.core.pool.KafkaClientWrapper;
 import org.kafka.eagle.core.util.MathUtils;
 import org.kafka.eagle.core.util.NetUtils;
 import org.kafka.eagle.core.util.StrUtils;
@@ -115,13 +117,19 @@ public class KafkaSchemaFactory {
      */
     public Map<String, String> getTopicConfig(KafkaClientInfo clientInfo, String topic) {
         Map<String, String> configMap = new HashMap<>();
-        try (AdminClient admin = AdminClient.create(plugin.buildAdminClientProps(clientInfo))) {
+        KafkaClientWrapper wrapper = null;
+        try {
+            wrapper = plugin.getClientPool().borrowClient(clientInfo);
             ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
-            DescribeConfigsResult result = admin.describeConfigs(Collections.singleton(resource));
+            DescribeConfigsResult result = wrapper.getAdminClient().describeConfigs(Collections.singleton(resource));
             Config config = result.all().get().get(resource);
             config.entries().forEach(entry -> configMap.put(entry.name(), entry.value()));
         } catch (Exception e) {
             log.error("获取主题 '{}' 在 '{}' 的配置失败：", topic, clientInfo, e);
+        } finally {
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
+            }
         }
 
         return configMap;
@@ -179,11 +187,17 @@ public class KafkaSchemaFactory {
      */
     public Set<Integer> listTopicPartitions(KafkaClientInfo clientInfo, String topic) {
         Set<Integer> partitions = new HashSet<>();
-        try (AdminClient admin = AdminClient.create(plugin.buildAdminClientProps(clientInfo))) {
-            DescribeTopicsResult result = admin.describeTopics(Collections.singleton(topic));
+        KafkaClientWrapper wrapper = null;
+        try {
+            wrapper = plugin.getClientPool().borrowClient(clientInfo);
+            DescribeTopicsResult result = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
             result.allTopicNames().get().get(topic).partitions().forEach(tp -> partitions.add(tp.partition()));
         } catch (Exception e) {
             log.error("获取主题 '{}' 的分区列表失败（{}）：", topic, clientInfo, e);
+        } finally {
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
+            }
         }
         return partitions;
     }
@@ -318,15 +332,21 @@ public class KafkaSchemaFactory {
     /* ======================= ADMIN CLIENT HELPER ======================= */
 
     /**
-     * 执行 AdminClient 操作（带错误处理）
+     * 执行 AdminClient 操作（带错误处理）- 使用连接池
      */
     private boolean executeAdmin(KafkaClientInfo clientInfo, AdminAction action, String actionDesc) {
-        try (AdminClient admin = AdminClient.create(plugin.buildAdminClientProps(clientInfo))) {
-            action.execute(admin);
+        KafkaClientWrapper wrapper = null;
+        try {
+            wrapper = plugin.getClientPool().borrowClient(clientInfo);
+            action.execute(wrapper.getAdminClient());
             return true;
         } catch (Exception e) {
-            log.error("{} 在 '{}' 上执行失败：", actionDesc, clientInfo, e);
+            log.error("{}在 '{}' 上执行失败：", actionDesc, clientInfo, e);
             return false;
+        } finally {
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
+            }
         }
     }
 
@@ -337,8 +357,10 @@ public class KafkaSchemaFactory {
      * @return List<BrokerInfo> Broker 详情列表（brokerId、host、port）
      */
     public List<BrokerInfo> getClusterBrokers(KafkaClientInfo clientInfo) {
-        try (AdminClient adminClient = AdminClient.create(plugin.buildAdminClientProps(clientInfo))) {
-            DescribeClusterResult clusterResult = adminClient.describeCluster();
+        KafkaClientWrapper wrapper = null;
+        try {
+            wrapper = plugin.getClientPool().borrowClient(clientInfo);
+            DescribeClusterResult clusterResult = wrapper.getAdminClient().describeCluster();
             Collection<Node> nodes = clusterResult.nodes().get();
 
             return nodes.stream()
@@ -352,6 +374,10 @@ public class KafkaSchemaFactory {
                     .toList(); // Java 16+，如果你用的是 Java 8，可以换成 collect(Collectors.toList())
         } catch (Exception e) {
             log.error("获取 '{}' 的集群 Broker 列表失败：", clientInfo, e);
+        } finally {
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
+            }
         }
         return Collections.emptyList();
     }
@@ -371,12 +397,12 @@ public class KafkaSchemaFactory {
             return topicMetas;
         }
 
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(clientInfo));
+            wrapper = plugin.getClientPool().borrowClient(clientInfo);
 
             // 1. Get topics description
-            DescribeTopicsResult describeTopicsResult = adminClient.describeTopics(topics);
+            DescribeTopicsResult describeTopicsResult = wrapper.getAdminClient().describeTopics(topics);
 
             // 2. Prepare config resources for batch config retrieval
             List<ConfigResource> configResources = new ArrayList<>();
@@ -384,7 +410,7 @@ public class KafkaSchemaFactory {
                 ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
                 configResources.add(resource);
             }
-            DescribeConfigsResult describeConfigsResult = adminClient.describeConfigs(configResources);
+            DescribeConfigsResult describeConfigsResult = wrapper.getAdminClient().describeConfigs(configResources);
             Map<ConfigResource, Config> topicConfigDescMap = describeConfigsResult.all().get();
 
             // 3. Process each topic
@@ -418,8 +444,8 @@ public class KafkaSchemaFactory {
         } catch (Exception e) {
             log.error("获取集群 '{}' 中主题 '{}' 的元数据失败: ", clientInfo.getClusterId(), topics, e);
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
 
@@ -577,9 +603,11 @@ public class KafkaSchemaFactory {
      */
     public List<MetadataInfo> getTopicPartitionMetadata(KafkaClientInfo kafkaClientInfo, String topic) {
         List<MetadataInfo> metadataInfos = new ArrayList<>();
+        KafkaClientWrapper wrapper = null;
 
-        try (AdminClient adminClient = AdminClient.create(plugin.buildAdminClientProps(kafkaClientInfo))) {
-            DescribeTopicsResult describeTopicsResult = adminClient.describeTopics(Collections.singleton(topic));
+        try {
+            wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
+            DescribeTopicsResult describeTopicsResult = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
             TopicDescription description = describeTopicsResult.allTopicNames().get().get(topic);
 
             if (description != null) {
@@ -609,6 +637,10 @@ public class KafkaSchemaFactory {
             }
         } catch (Exception e) {
             log.error("获取集群 '{}' 中主题 '{}' 的元数据失败: ", kafkaClientInfo.getClusterId(), topic, e);
+        } finally {
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
+            }
         }
 
         return metadataInfos;
@@ -644,11 +676,11 @@ public class KafkaSchemaFactory {
      */
     public TopicPartitionPageResult getTopicPartitionPage(KafkaClientInfo kafkaClientInfo, String topic, Map<String, Object> params) {
         TopicPartitionPageResult result = new TopicPartitionPageResult();
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
 
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(kafkaClientInfo));
-            DescribeTopicsResult describeTopicsResult = adminClient.describeTopics(Collections.singleton(topic));
+            wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
+            DescribeTopicsResult describeTopicsResult = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
 
             Map<String, TopicDescription> topicDescriptions = describeTopicsResult.allTopicNames().get();
             TopicDescription topicDescription = topicDescriptions.get(topic);
@@ -685,8 +717,8 @@ public class KafkaSchemaFactory {
             log.error("获取集群 '{}' 中主题 '{}' 的分区页面失败: ", kafkaClientInfo.getClusterId(), topic, e);
             result.setTotal(0);
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
 
@@ -761,23 +793,23 @@ public class KafkaSchemaFactory {
      * @return ConsumerGroupDescInfo containing consumer group IDs and descriptions
      */
     public ConsumerGroupDescInfo getKafkaConsumerGroups(KafkaClientInfo kafkaClientInfo) {
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         ConsumerGroupDescInfo consumerGroupDescInfo = new ConsumerGroupDescInfo();
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(kafkaClientInfo));
-            for (ConsumerGroupListing consumerGroupListing : adminClient.listConsumerGroups().all().get()) {
+            wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
+            for (ConsumerGroupListing consumerGroupListing : wrapper.getAdminClient().listConsumerGroups().all().get()) {
                 String groupId = consumerGroupListing.groupId();
                 if (!groupId.equals(ClusterMetricsConst.Cluster.EFAK_SYSTEM_GROUP.key())) {
                     consumerGroupDescInfo.getGroupIds().add(groupId);
                 }
             }
-            Map<String, ConsumerGroupDescription> descConsumerGroup = adminClient.describeConsumerGroups(consumerGroupDescInfo.getGroupIds()).all().get();
+            Map<String, ConsumerGroupDescription> descConsumerGroup = wrapper.getAdminClient().describeConsumerGroups(consumerGroupDescInfo.getGroupIds()).all().get();
             consumerGroupDescInfo.getDescConsumerGroup().putAll(descConsumerGroup);
         } catch (Exception e) {
             log.error("获取数据库 '{}' 的消费者组对象失败: ", kafkaClientInfo, e);
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
 
@@ -793,16 +825,16 @@ public class KafkaSchemaFactory {
      */
     public List<ConsumerGroupTopicInfo> getKafkaConsumerGroupTopic(KafkaClientInfo kafkaClientInfo, Set<String> groupIds) {
         List<ConsumerGroupTopicInfo> consumerGroupTopicInfos = new ArrayList<>();
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(kafkaClientInfo));
+            wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
 
             // 批量获取消费者组状态，减少API请求次数
-            Map<String, ConsumerGroupDescription> descConsumerGroup = adminClient.describeConsumerGroups(groupIds).all().get();
+            Map<String, ConsumerGroupDescription> descConsumerGroup = wrapper.getAdminClient().describeConsumerGroups(groupIds).all().get();
 
             for (String groupId : groupIds) {
                 Map<String, Long> topicOffsetsMap = new HashMap<>();
-                ListConsumerGroupOffsetsResult offsetsResult = adminClient.listConsumerGroupOffsets(groupId);
+                ListConsumerGroupOffsetsResult offsetsResult = wrapper.getAdminClient().listConsumerGroupOffsets(groupId);
                 Map<TopicPartition, OffsetAndMetadata> offsets = offsetsResult.partitionsToOffsetAndMetadata().get();
                 if (offsets != null && !offsets.isEmpty()) {
                     for (Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
@@ -845,8 +877,8 @@ public class KafkaSchemaFactory {
         } catch (Exception e) {
             log.error("获取消费者组主题偏移量时出错，数据库 {}: ", kafkaClientInfo, e);
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
         return consumerGroupTopicInfos;
@@ -856,12 +888,12 @@ public class KafkaSchemaFactory {
      * 获取消费者组ID列表
      */
     public Set<String> getConsumerGroupIds(KafkaClientInfo kafkaClientInfo) {
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         Set<String> groupIdSets = new HashSet<>();
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(kafkaClientInfo));
+            wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
 
-            for (ConsumerGroupListing consumerGroupListing : adminClient.listConsumerGroups().all().get()) {
+            for (ConsumerGroupListing consumerGroupListing : wrapper.getAdminClient().listConsumerGroups().all().get()) {
                 String groupId = consumerGroupListing.groupId();
                 if (!groupId.equals(ClusterMetricsConst.Cluster.EFAK_SYSTEM_GROUP.key())) {
                     groupIdSets.add(groupId);
@@ -871,8 +903,8 @@ public class KafkaSchemaFactory {
         } catch (Exception e) {
             log.error("加载数据库 '{}' 的 Kafka 客户端失败: ", kafkaClientInfo, e);
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
         return groupIdSets;
@@ -885,12 +917,12 @@ public class KafkaSchemaFactory {
      * @return List of ConsumerGroupDetailInfo containing detailed consumer group information
      */
     public List<ConsumerGroupDetailInfo> getConsumerGroups(KafkaClientInfo kafkaClientInfo) {
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         List<ConsumerGroupDetailInfo> consumerGroupInfos = new ArrayList<>();
 
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(kafkaClientInfo));
-            Iterator<ConsumerGroupListing> itors = adminClient.listConsumerGroups().all().get().iterator();
+            wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
+            Iterator<ConsumerGroupListing> itors = wrapper.getAdminClient().listConsumerGroups().all().get().iterator();
             Set<String> groupIdSets = new HashSet<>();
             while (itors.hasNext()) {
                 String groupId = itors.next().groupId();
@@ -898,7 +930,7 @@ public class KafkaSchemaFactory {
                     groupIdSets.add(groupId);
                 }
             }
-            Map<String, ConsumerGroupDescription> descConsumerGroup = adminClient.describeConsumerGroups(groupIdSets).all().get();
+            Map<String, ConsumerGroupDescription> descConsumerGroup = wrapper.getAdminClient().describeConsumerGroups(groupIdSets).all().get();
             for (String groupId : groupIdSets) {
                 if (descConsumerGroup.containsKey(groupId)) {// active
                     ConsumerGroupDescription consumerGroupDescription = descConsumerGroup.get(groupId);
@@ -944,8 +976,8 @@ public class KafkaSchemaFactory {
         } catch (Exception e) {
             log.error("加载数据库 '{}' 的 Kafka 客户端失败: ", kafkaClientInfo, e);
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
 
@@ -960,13 +992,13 @@ public class KafkaSchemaFactory {
      * @return List of ConsumerGroupDetailInfo containing detailed consumer group information
      */
     public List<ConsumerGroupDetailInfo> getConsumerGroups(KafkaClientInfo kafkaClientInfo, Set<String> groupIds) {
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         List<ConsumerGroupDetailInfo> consumerGroupInfos = new ArrayList<>();
 
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(kafkaClientInfo));
+            wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
 
-            Map<String, ConsumerGroupDescription> descConsumerGroup = adminClient.describeConsumerGroups(groupIds).all().get();
+            Map<String, ConsumerGroupDescription> descConsumerGroup = wrapper.getAdminClient().describeConsumerGroups(groupIds).all().get();
             for (String groupId : groupIds) {
                 if (descConsumerGroup.containsKey(groupId)) {// active
                     ConsumerGroupDescription consumerGroupDescription = descConsumerGroup.get(groupId);
@@ -1012,8 +1044,8 @@ public class KafkaSchemaFactory {
         } catch (Exception e) {
             log.error("Failure while loading kafka client for database '{}': ", kafkaClientInfo, e);
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
 
@@ -1041,12 +1073,12 @@ public class KafkaSchemaFactory {
      */
     public boolean resetConsumerGroupOffsets(KafkaClientInfo clientInfo, String groupId,
                                            String topic, String mode, Long value) {
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(clientInfo));
+            wrapper = plugin.getClientPool().borrowClient(clientInfo);
 
             // 1. 获取 topic 的分区信息
-            DescribeTopicsResult describeTopicsResult = adminClient.describeTopics(Collections.singleton(topic));
+            DescribeTopicsResult describeTopicsResult = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
             TopicDescription topicDescription = describeTopicsResult.topicNameValues().get(topic).get();
 
             List<TopicPartition> partitions = new ArrayList<>();
@@ -1065,7 +1097,7 @@ public class KafkaSchemaFactory {
                     for (TopicPartition tp : partitions) {
                         request.put(tp, mode.equals("earliest") ? OffsetSpec.earliest() : OffsetSpec.latest());
                     }
-                    ListOffsetsResult offsetsResult = adminClient.listOffsets(request);
+                    ListOffsetsResult offsetsResult = wrapper.getAdminClient().listOffsets(request);
                     for (TopicPartition tp : partitions) {
                         long offset = offsetsResult.partitionResult(tp).get().offset();
                         newOffsets.put(tp, new OffsetAndMetadata(offset));
@@ -1093,7 +1125,7 @@ public class KafkaSchemaFactory {
                     for (TopicPartition tp : partitions) {
                         request.put(tp, OffsetSpec.forTimestamp(value));
                     }
-                    ListOffsetsResult offsetsResult = adminClient.listOffsets(request);
+                    ListOffsetsResult offsetsResult = wrapper.getAdminClient().listOffsets(request);
                     for (TopicPartition tp : partitions) {
                         ListOffsetsResult.ListOffsetsResultInfo info = offsetsResult.partitionResult(tp).get();
                         if (info != null && info.offset() >= 0) {
@@ -1103,7 +1135,7 @@ public class KafkaSchemaFactory {
                             // 如果指定时间戳没有找到对应的偏移量，使用最早的偏移量
                             Map<TopicPartition, OffsetSpec> fallbackRequest = new HashMap<>();
                             fallbackRequest.put(tp, OffsetSpec.earliest());
-                            ListOffsetsResult fallbackResult = adminClient.listOffsets(fallbackRequest);
+                            ListOffsetsResult fallbackResult = wrapper.getAdminClient().listOffsets(fallbackRequest);
                             long fallbackOffset = fallbackResult.partitionResult(tp).get().offset();
                             newOffsets.put(tp, new OffsetAndMetadata(fallbackOffset));
                         }
@@ -1117,7 +1149,7 @@ public class KafkaSchemaFactory {
             }
 
             // 3. 提交新的偏移量
-            adminClient.alterConsumerGroupOffsets(groupId, newOffsets).all().get();
+            wrapper.getAdminClient().alterConsumerGroupOffsets(groupId, newOffsets).all().get();
 
             log.info("Successfully reset consumer group [{}] offsets for topic [{}] to mode [{}]",
                     groupId, topic, mode);
@@ -1128,8 +1160,8 @@ public class KafkaSchemaFactory {
                     groupId, topic, mode, e);
             return false;
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
     }
@@ -1147,12 +1179,12 @@ public class KafkaSchemaFactory {
      */
     public boolean resetConsumerGroupOffsetsForAllTopics(KafkaClientInfo clientInfo, String groupId,
                                                         String mode, Long value) {
-        AdminClient adminClient = null;
+        KafkaClientWrapper wrapper = null;
         try {
-            adminClient = AdminClient.create(plugin.buildAdminClientProps(clientInfo));
+            wrapper = plugin.getClientPool().borrowClient(clientInfo);
 
             // 1. 获取消费者组消费的所有 topic 和分区
-            ListConsumerGroupOffsetsResult offsetsResult = adminClient.listConsumerGroupOffsets(groupId);
+            ListConsumerGroupOffsetsResult offsetsResult = wrapper.getAdminClient().listConsumerGroupOffsets(groupId);
             Map<TopicPartition, OffsetAndMetadata> currentOffsets = offsetsResult.partitionsToOffsetAndMetadata().get();
 
             if (currentOffsets.isEmpty()) {
@@ -1180,7 +1212,7 @@ public class KafkaSchemaFactory {
                         for (TopicPartition tp : partitions) {
                             request.put(tp, mode.equals("earliest") ? OffsetSpec.earliest() : OffsetSpec.latest());
                         }
-                        ListOffsetsResult offsetsRes = adminClient.listOffsets(request);
+                        ListOffsetsResult offsetsRes = wrapper.getAdminClient().listOffsets(request);
                         for (TopicPartition tp : partitions) {
                             long offset = offsetsRes.partitionResult(tp).get().offset();
                             newOffsets.put(tp, new OffsetAndMetadata(offset));
@@ -1208,7 +1240,7 @@ public class KafkaSchemaFactory {
                         for (TopicPartition tp : partitions) {
                             request.put(tp, OffsetSpec.forTimestamp(value));
                         }
-                        ListOffsetsResult offsetsRes = adminClient.listOffsets(request);
+                        ListOffsetsResult offsetsRes = wrapper.getAdminClient().listOffsets(request);
                         for (TopicPartition tp : partitions) {
                             ListOffsetsResult.ListOffsetsResultInfo info = offsetsRes.partitionResult(tp).get();
                             if (info != null && info.offset() >= 0) {
@@ -1217,7 +1249,7 @@ public class KafkaSchemaFactory {
                                 // 如果指定时间戳没有找到对应的偏移量，使用最早的偏移量
                                 Map<TopicPartition, OffsetSpec> fallbackRequest = new HashMap<>();
                                 fallbackRequest.put(tp, OffsetSpec.earliest());
-                                ListOffsetsResult fallbackResult = adminClient.listOffsets(fallbackRequest);
+                                ListOffsetsResult fallbackResult = wrapper.getAdminClient().listOffsets(fallbackRequest);
                                 long fallbackOffset = fallbackResult.partitionResult(tp).get().offset();
                                 newOffsets.put(tp, new OffsetAndMetadata(fallbackOffset));
                             }
@@ -1232,7 +1264,7 @@ public class KafkaSchemaFactory {
             }
 
             // 4. 提交新的偏移量
-            adminClient.alterConsumerGroupOffsets(groupId, newOffsets).all().get();
+            wrapper.getAdminClient().alterConsumerGroupOffsets(groupId, newOffsets).all().get();
 
             log.info("Successfully reset consumer group [{}] offsets for all topics to mode [{}]",
                     groupId, mode);
@@ -1243,8 +1275,8 @@ public class KafkaSchemaFactory {
                     groupId, mode, e);
             return false;
         } finally {
-            if (adminClient != null) {
-                plugin.registerResourceForClose(adminClient);
+            if (wrapper != null) {
+                plugin.getClientPool().returnClient(wrapper);
             }
         }
     }
