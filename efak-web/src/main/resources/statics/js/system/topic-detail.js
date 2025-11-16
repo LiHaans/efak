@@ -1170,3 +1170,188 @@ function showNotification(message, type = 'info') {
         }
     }, 3000);
 }
+
+// ==================== 发送消息功能 ====================
+
+// 打开发送消息对话框
+function openSendMessageModal() {
+    const modal = document.getElementById('sendMessageModal');
+    const topicName = document.getElementById('topicName').textContent;
+    
+    // 设置主题名称
+    document.getElementById('sendTopicName').value = topicName;
+    
+    // 初始化分区选择器
+    initializePartitionSelect();
+    
+    // 重置表单
+    document.getElementById('sendMessageForm').reset();
+    document.getElementById('sendTopicName').value = topicName;
+    document.getElementById('sendMessageContent').value = '';
+    document.getElementById('sendKey').value = '';
+    document.getElementById('sendCount').value = '1';
+    
+    // 显示对话框
+    modal.style.display = 'flex';
+    
+    // 聚焦到消息内容输入框
+    setTimeout(() => {
+        document.getElementById('sendMessageContent').focus();
+    }, 100);
+}
+
+// 关闭发送消息对话框
+function closeSendMessageModal() {
+    const modal = document.getElementById('sendMessageModal');
+    modal.style.display = 'none';
+}
+
+// 点击遮罩层关闭对话框
+function closeSendMessageOnOverlay(event) {
+    if (event.target.id === 'sendMessageModal') {
+        closeSendMessageModal();
+    }
+}
+
+// 初始化分区选择器
+function initializePartitionSelect() {
+    const select = document.getElementById('sendPartition');
+    const partitionCount = parseInt(document.getElementById('partitionCount').textContent) || 0;
+    
+    // 清空选项
+    select.innerHTML = '<option value="">自动分配</option>';
+    
+    // 添加分区选项
+    for (let i = 0; i < partitionCount; i++) {
+        const option = document.createElement('option');
+        option.value = i;
+        option.textContent = `分区 ${i}`;
+        select.appendChild(option);
+    }
+}
+
+// 格式切换事件
+function onFormatChange() {
+    const format = document.querySelector('input[name="messageFormat"]:checked').value;
+    const messageContent = document.getElementById('sendMessageContent');
+    
+    if (format === 'json') {
+        messageContent.placeholder = '{"example": "message"}';
+    } else if (format === 'avro') {
+        messageContent.placeholder = '请输入Avro格式的消息\n注意：需要在集群配置中设置Schema Registry URL';
+        showNotification('Avro格式需要在集群配置中设置Schema Registry URL', 'info');
+    }
+}
+
+// 发送消息
+async function sendMessage(event) {
+    event.preventDefault();
+    
+    const topicName = document.getElementById('sendTopicName').value;
+    const format = document.querySelector('input[name="messageFormat"]:checked').value;
+    const partition = document.getElementById('sendPartition').value;
+    const key = document.getElementById('sendKey').value;
+    const message = document.getElementById('sendMessageContent').value;
+    const count = parseInt(document.getElementById('sendCount').value) || 1;
+    
+    // 参数校验
+    if (!message || message.trim() === '') {
+        showNotification('请输入消息内容', 'error');
+        return;
+    }
+    
+    // JSON格式验证
+    if (format === 'json') {
+        try {
+            JSON.parse(message);
+        } catch (e) {
+            showNotification('JSON格式错误，请检查后重试', 'error');
+            return;
+        }
+    }
+    
+    if (count < 1 || count > 1000) {
+        showNotification('发送数量必须在1-1000之间', 'error');
+        return;
+    }
+    
+    // 获取集群ID
+    const urlParams = new URLSearchParams(window.location.search);
+    const clusterId = urlParams.get('cid');
+    
+    if (!clusterId) {
+        showNotification('集群ID不存在', 'error');
+        return;
+    }
+    
+    // 构造请求数据
+    const requestData = {
+        topicName: topicName,
+        clusterId: clusterId,
+        format: format,
+        message: message,
+        count: count
+    };
+    
+    // 可选参数
+    if (partition !== '') {
+        requestData.partition = parseInt(partition);
+    }
+    if (key && key.trim() !== '') {
+        requestData.key = key.trim();
+    }
+    
+    // 禁用发送按钮，显示加载状态
+    const sendBtn = document.getElementById('sendMessageBtn');
+    const originalBtnHtml = sendBtn.innerHTML;
+    sendBtn.disabled = true;
+    sendBtn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i>发送中...';
+    
+    try {
+        // 调用API发送消息
+        const response = await fetch('/topic/api/send-message', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(requestData)
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            // 成功
+            const successCount = result.successCount || count;
+            const failCount = result.failCount || 0;
+            
+            if (failCount === 0) {
+                showNotification(`成功发送 ${successCount} 条消息`, 'success');
+            } else {
+                showNotification(`发送完成：成功 ${successCount} 条，失败 ${failCount} 条`, 'warning');
+            }
+            
+            // 关闭对话框
+            closeSendMessageModal();
+            
+            // 刷新页面数据
+            setTimeout(() => {
+                refreshTopicData();
+            }, 500);
+        } else {
+            // 失败
+            showNotification(result.message || '发送消息失败', 'error');
+        }
+        
+    } catch (error) {
+        console.error('发送消息失败:', error);
+        showNotification('发送消息失败：' + error.message, 'error');
+    } finally {
+        // 恢复发送按钮
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = originalBtnHtml;
+    }
+}
