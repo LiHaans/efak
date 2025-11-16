@@ -518,7 +518,6 @@ public interface ConsumerGroupTopicMapper {
             "  SELECT group_id, MAX(collect_time) as max_time " +
             "  FROM ke_consumer_group_topic " +
             "  WHERE cluster_id = #{clusterId} AND topic_name = #{topicName} " +
-            "  AND collect_date = CURDATE() " +
             "  GROUP BY group_id " +
             ") t2 ON t1.group_id = t2.group_id AND t1.collect_time = t2.max_time " +
             "WHERE t1.cluster_id = #{clusterId} AND t1.topic_name = #{topicName} " +
@@ -538,8 +537,7 @@ public interface ConsumerGroupTopicMapper {
      */
     @Select("SELECT COUNT(DISTINCT group_id) " +
             "FROM ke_consumer_group_topic " +
-            "WHERE cluster_id = #{clusterId} AND topic_name = #{topicName} " +
-            "AND collect_date = CURDATE()")
+            "WHERE cluster_id = #{clusterId} AND topic_name = #{topicName}")
     Long countConsumerGroupsByTopicForDetail(@Param("clusterId") String clusterId,
                                            @Param("topicName") String topicName);
 
