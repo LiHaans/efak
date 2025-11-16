@@ -100,7 +100,7 @@ public class ShardResultAggregationService {
             Map<String, Object> allShardResults = taskCoordinator.getAllShardResults(taskType);
             
             if (allShardResults.isEmpty()) {
-                log.warn("没有找到{}任务的分片结果", taskType);
+                log.debug("没有找到{}任务的分片结果 (单节点环境下正常)", taskType);
                 return createEmptyAggregationResult(taskType);
             }
             

@@ -284,9 +284,16 @@ public class UnifiedDistributedScheduler {
      * 执行任务（通用方法）
      */
     private void executeTaskWithTriggerType(TaskScheduler task, String triggerType) {
-        if (runningTasks.containsKey(task.getId())) {
-            log.warn("任务 {} 正在执行中，跳过本次执行", task.getTaskName());
-            return;
+        // 检查并清理已完成的任务
+        Future<?> existingTask = runningTasks.get(task.getId());
+        if (existingTask != null) {
+            if (existingTask.isDone() || existingTask.isCancelled()) {
+                log.info("任务 {} 已完成但未清理，强制清理", task.getTaskName());
+                runningTasks.remove(task.getId());
+            } else {
+                log.debug("任务 {} 正在执行中，跳过本次执行 (正常情况)", task.getTaskName());
+                return;
+            }
         }
 
         Future<?> future = schedulerExecutor.submit(() -> {
@@ -317,10 +324,17 @@ public class UnifiedDistributedScheduler {
                 updateTaskStatus(task, "FAILED");
             } finally {
                 runningTasks.remove(task.getId());
+                log.debug("任务 {} 执行完成，已从runningTasks中移除", task.getTaskName());
             }
         });
 
-        runningTasks.put(task.getId(), future);
+        // 使用putIfAbsent确保原子性
+        Future<?> previous = runningTasks.putIfAbsent(task.getId(), future);
+        if (previous != null) {
+            // 如果已存在，取消新提交的任务
+            future.cancel(false);
+            log.debug("任务 {} 提交时发现已在执行中，取消本次提交 (并发竞争)", task.getTaskName());
+        }
     }
 
     /**
