@@ -142,11 +142,16 @@ public class TaskExecutorManager {
      */
     private TaskExecutionResult executeTopicMonitorTask(TaskScheduler task) {
         TaskExecutionResult result = new TaskExecutionResult();
+        long startTime = System.currentTimeMillis();
 
         try {
+            log.info("[Topic监控] 开始执行任务, taskId={}", task.getId());
 
             // 1. 从数据库ke_cluster表获取所有集群信息
+            log.info("[Topic监控] 步骤1: 获取集群信息");
             List<KafkaClusterInfo> clusters = getAllClusters();
+            log.info("[Topic监控] 步骤1完成: 获取到{}个集群, 耗时{}ms", 
+                clusters != null ? clusters.size() : 0, System.currentTimeMillis() - startTime);
             if (clusters == null || clusters.isEmpty()) {
                 log.info("数据库中没有集群信息，跳过主题监控任务");
                 result.setSuccess(true);
@@ -158,21 +163,34 @@ public class TaskExecutorManager {
             List<String> allTopicNames = new ArrayList<>();
             Map<String, String> topicToClusterMap = new HashMap<>(); // 主题名称到集群ID的映射
 
+            log.info("[Topic监控] 步骤2: 开始获取所有主题名称");
+            long step2Start = System.currentTimeMillis();
+            
             for (KafkaClusterInfo cluster : clusters) {
                 try {
+                    log.info("[Topic监控] 步骤2.1: 处理集群{}", cluster.getClusterId());
                     // 从数据库ke_broker_info表获取当前集群的Broker信息
                     List<BrokerInfo> brokers = brokerMapper.getBrokersByClusterId(cluster.getClusterId());
+                    log.info("[Topic监控] 步骤2.2: 集群{}获取到{}个broker", 
+                        cluster.getClusterId(), brokers.size());
                     if (brokers.isEmpty()) {
                         log.warn("集群 {} 没有broker信息，跳过", cluster.getClusterId());
                         continue;
                     }
 
                     // 构建KafkaClientInfo，使用KafkaClientUtils工具类
+                    log.info("[Topic监控] 步骤2.3: 集群{}构建KafkaClientInfo", cluster.getClusterId());
                     KafkaClientInfo kafkaClientInfo = KafkaClientUtils.buildKafkaClientInfo(cluster, brokers);
 
                     // 使用KafkaSchemaFactory获取主题名称
+                    log.info("[Topic监控] 步骤2.4: 集群{}开始调用listTopicNames - 可能阻塞点!!!", 
+                        cluster.getClusterId());
+                    long listTopicsStart = System.currentTimeMillis();
                     KafkaSchemaFactory ksf = new KafkaSchemaFactory(new KafkaStoragePlugin());
                     Set<String> clusterTopics = ksf.listTopicNames(kafkaClientInfo);
+                    log.info("[Topic监控] 步骤2.5: 集群{}获取到{}个主题, 耗时{}ms", 
+                        cluster.getClusterId(), clusterTopics.size(), 
+                        System.currentTimeMillis() - listTopicsStart);
 
                     // 将主题添加到总列表，并记录所属集群
                     for (String topicName : clusterTopics) {

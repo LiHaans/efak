@@ -138,14 +138,36 @@ public class KafkaSchemaFactory {
 
     /**
      * 列出所有主题（排除内部偏移量主题）
+     * 添加超时控制防止无限期阻塞
      */
     public Set<String> listTopicNames(KafkaClientInfo clientInfo) {
         Set<String> topics = new HashSet<>();
-        try (KafkaConsumer<?, ?> consumer = new KafkaConsumer<>(plugin.buildConsumerProps(clientInfo))) {
-            topics.addAll(consumer.listTopics().keySet());
+        
+        try {
+            log.info("开始获取集群 {} 的主题列表", clientInfo.getClusterId());
+            
+            // 使用超时包装器，默认30秒超时
+            topics = org.kafka.eagle.core.util.TimeoutWrapper.executeWithTimeout(() -> {
+                Set<String> result = new HashSet<>();
+                try (KafkaConsumer<?, ?> consumer = new KafkaConsumer<>(plugin.buildConsumerProps(clientInfo))) {
+                    log.info("正在调用 consumer.listTopics() for cluster: {}", clientInfo.getClusterId());
+                    result.addAll(consumer.listTopics().keySet());
+                    log.info("成功获取到 {} 个主题 for cluster: {}", result.size(), clientInfo.getClusterId());
+                } catch (Exception e) {
+                    log.error("创建KafkaConsumer或listTopics失败 for cluster: {}", clientInfo.getClusterId(), e);
+                    throw e;
+                }
+                return result;
+            }, 30, java.util.concurrent.TimeUnit.SECONDS, 
+                "listTopicNames-" + clientInfo.getClusterId());
+            
+        } catch (java.util.concurrent.TimeoutException e) {
+            log.error("获取集群 '{}' 的主题列表超时（>30s）", clientInfo.getClusterId());
+            // 超时时返回空集合，继续处理其他集群
         } catch (Exception e) {
             log.error("列出 '{}' 的主题失败：", clientInfo, e);
         }
+        
         topics.remove(ClusterMetricsConst.Cluster.CONSUMER_OFFSET_TOPIC.key());
         return topics;
     }
