@@ -1234,12 +1234,16 @@ function initializePartitionSelect() {
 function onFormatChange() {
     const format = document.querySelector('input[name="messageFormat"]:checked').value;
     const messageContent = document.getElementById('sendMessageContent');
+    const schemaSection = document.getElementById('avroSchemaSection');
     
     if (format === 'json') {
+        // JSON格式：隐藏Schema输入区
+        schemaSection.style.display = 'none';
         messageContent.placeholder = '{"example": "message"}';
     } else if (format === 'avro') {
-        messageContent.placeholder = '请输入Avro格式的消息\n注意：需要在集群配置中设置Schema Registry URL';
-        showNotification('Avro格式需要在集群配置中设置Schema Registry URL', 'info');
+        // Avro格式：显示Schema输入区
+        schemaSection.style.display = 'block';
+        messageContent.placeholder = '{"name": "John", "age": 30}';
     }
 }
 
@@ -1252,6 +1256,7 @@ async function sendMessage(event) {
     const partition = document.getElementById('sendPartition').value;
     const key = document.getElementById('sendKey').value;
     const message = document.getElementById('sendMessageContent').value;
+    const schema = document.getElementById('sendSchema').value;
     const count = parseInt(document.getElementById('sendCount').value) || 1;
     
     // 参数校验
@@ -1266,6 +1271,31 @@ async function sendMessage(event) {
             JSON.parse(message);
         } catch (e) {
             showNotification('JSON格式错误，请检查后重试', 'error');
+            return;
+        }
+    }
+    
+    // Avro格式验证
+    if (format === 'avro') {
+        // 校验Schema
+        if (!schema || schema.trim() === '') {
+            showNotification('Avro格式必须提供Schema', 'error');
+            return;
+        }
+        
+        // 验证Schema是否为合法的JSON
+        try {
+            JSON.parse(schema);
+        } catch (e) {
+            showNotification('Schema格式错误，必须是合法的JSON', 'error');
+            return;
+        }
+        
+        // 验证消息格式
+        try {
+            JSON.parse(message);
+        } catch (e) {
+            showNotification('Avro消息必须是JSON格式', 'error');
             return;
         }
     }
@@ -1299,6 +1329,10 @@ async function sendMessage(event) {
     }
     if (key && key.trim() !== '') {
         requestData.key = key.trim();
+    }
+    // Avro格式需要添加Schema
+    if (format === 'avro' && schema && schema.trim() !== '') {
+        requestData.schema = schema.trim();
     }
     
     // 禁用发送按钮，显示加载状态

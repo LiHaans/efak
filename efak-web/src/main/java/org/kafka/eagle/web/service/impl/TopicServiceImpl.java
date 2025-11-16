@@ -9,11 +9,14 @@ import org.kafka.eagle.dto.broker.BrokerInfo;
 import org.kafka.eagle.dto.cluster.KafkaClientInfo;
 import org.kafka.eagle.dto.jmx.JMXInitializeInfo;
 import org.kafka.eagle.dto.topic.*;
+import org.kafka.eagle.dto.cluster.KafkaClusterInfo;
 import org.kafka.eagle.web.mapper.BrokerMapper;
+import org.kafka.eagle.web.mapper.ClusterMapper;
 import org.kafka.eagle.web.mapper.ConsumerGroupTopicMapper;
 import org.kafka.eagle.web.mapper.TopicInstantMetricsMapper;
 import org.kafka.eagle.web.mapper.TopicMapper;
 import org.kafka.eagle.web.mapper.TopicMetricsMapper;
+import org.kafka.eagle.web.util.AvroMessageSerializer;
 import org.kafka.eagle.web.service.TopicService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -53,6 +56,9 @@ public class TopicServiceImpl implements TopicService {
 
     @Autowired
     private ConsumerGroupTopicMapper consumerGroupTopicMapper;
+
+    @Autowired
+    private ClusterMapper clusterMapper;
 
     @Override
     public TopicPageResponse getTopicPage(TopicQueryRequest request) {
@@ -1016,72 +1022,152 @@ public class TopicServiceImpl implements TopicService {
                 }
             }
             
-            // 创建KafkaProducer配置
-            Properties props = new Properties();
-            props.put("bootstrap.servers", bootstrapServers.toString());
-            props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-            props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-            props.put("acks", "all"); // 确保消息可靠性
-            props.put("retries", 3);
-            props.put("max.request.size", 10485760); // 10MB
+            // 判断消息格式
+            String format = request.getFormat();
+            if (!StringUtils.hasText(format)) {
+                format = "json"; // 默认JSON格式
+            }
             
             int successCount = 0;
             int failCount = 0;
             int messageCount = request.getCount() != null && request.getCount() > 0 ? request.getCount() : 1;
             
-            try (org.apache.kafka.clients.producer.KafkaProducer<String, String> producer = 
-                    new org.apache.kafka.clients.producer.KafkaProducer<>(props)) {
+            // 根据格式选择不同的发送逻辑
+            if ("avro".equalsIgnoreCase(format)) {
+                // ========== Avro格式发送 ==========
                 
-                for (int i = 0; i < messageCount; i++) {
-                    try {
-                        // 根据格式处理消息
-                        String messageContent = request.getMessage();
-                        
-                        // 如果是JSON格式，验证JSON合法性
-                        if ("json".equalsIgnoreCase(request.getFormat())) {
-                            try {
-                                // 简单验证JSON格式
-                                new com.fasterxml.jackson.databind.ObjectMapper().readTree(messageContent);
-                            } catch (Exception e) {
-                                result.put("success", false);
-                                result.put("message", "JSON格式错误: " + e.getMessage());
-                                return result;
+                // 1. 校验Schema
+                if (!StringUtils.hasText(request.getSchema())) {
+                    result.put("success", false);
+                    result.put("message", "Avro格式必须提供Schema");
+                    return result;
+                }
+                
+                // 2. 获取集群的Schema Registry URL
+                KafkaClusterInfo clusterInfo = clusterMapper.findByClusterId(request.getClusterId());
+                if (clusterInfo == null || !StringUtils.hasText(clusterInfo.getSchemaRegistryUrl())) {
+                    result.put("success", false);
+                    result.put("message", "集群未配置Schema Registry URL，请先在集群配置中设置");
+                    return result;
+                }
+                
+                // 3. 验证Schema和消息格式
+                String validationError = AvroMessageSerializer.validateJsonAgainstSchema(
+                    request.getMessage(), request.getSchema());
+                if (validationError != null) {
+                    result.put("success", false);
+                    result.put("message", "消息与Schema不匹配: " + validationError);
+                    return result;
+                }
+                
+                // 4. 配置Avro Producer
+                Properties avroProps = new Properties();
+                avroProps.put("bootstrap.servers", bootstrapServers.toString());
+                avroProps.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+                avroProps.put("value.serializer", "io.confluent.kafka.serializers.KafkaAvroSerializer");
+                avroProps.put("schema.registry.url", clusterInfo.getSchemaRegistryUrl());
+                avroProps.put("acks", "all");
+                avroProps.put("retries", 3);
+                avroProps.put("max.request.size", 10485760); // 10MB
+                
+                try (org.apache.kafka.clients.producer.KafkaProducer<String, org.apache.avro.generic.GenericRecord> avroProducer = 
+                        new org.apache.kafka.clients.producer.KafkaProducer<>(avroProps)) {
+                    
+                    for (int i = 0; i < messageCount; i++) {
+                        try {
+                            // 将JSON转换为GenericRecord
+                            org.apache.avro.generic.GenericRecord avroRecord = 
+                                AvroMessageSerializer.jsonToAvroRecord(request.getMessage(), request.getSchema());
+                            
+                            // 构造ProducerRecord
+                            org.apache.kafka.clients.producer.ProducerRecord<String, org.apache.avro.generic.GenericRecord> record;
+                            if (request.getPartition() != null) {
+                                record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                    request.getTopicName(), 
+                                    request.getPartition(), 
+                                    request.getKey(), 
+                                    avroRecord
+                                );
+                            } else if (StringUtils.hasText(request.getKey())) {
+                                record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                    request.getTopicName(), 
+                                    request.getKey(), 
+                                    avroRecord
+                                );
+                            } else {
+                                record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                    request.getTopicName(), 
+                                    avroRecord
+                                );
                             }
+                            
+                            // 发送消息
+                            avroProducer.send(record).get();
+                            successCount++;
+                            
+                        } catch (Exception e) {
+                            log.error("发送Avro消息失败，第{}条: {}", i + 1, e.getMessage(), e);
+                            failCount++;
                         }
-                        // TODO: Avro格式处理需要Schema Registry支持，后续实现
-                        
-                        // 构造ProducerRecord
-                        org.apache.kafka.clients.producer.ProducerRecord<String, String> record;
-                        if (request.getPartition() != null) {
-                            // 指定分区
-                            record = new org.apache.kafka.clients.producer.ProducerRecord<>(
-                                request.getTopicName(), 
-                                request.getPartition(), 
-                                request.getKey(), 
-                                messageContent
-                            );
-                        } else if (StringUtils.hasText(request.getKey())) {
-                            // 有Key但不指定分区
-                            record = new org.apache.kafka.clients.producer.ProducerRecord<>(
-                                request.getTopicName(), 
-                                request.getKey(), 
-                                messageContent
-                            );
-                        } else {
-                            // 没有Key也没有指定分区
-                            record = new org.apache.kafka.clients.producer.ProducerRecord<>(
-                                request.getTopicName(), 
-                                messageContent
-                            );
+                    }
+                }
+                
+            } else {
+                // ========== JSON格式发送 ==========
+                
+                // 验证JSON格式
+                try {
+                    new com.fasterxml.jackson.databind.ObjectMapper().readTree(request.getMessage());
+                } catch (Exception e) {
+                    result.put("success", false);
+                    result.put("message", "JSON格式错误: " + e.getMessage());
+                    return result;
+                }
+                
+                // 配置JSON Producer
+                Properties jsonProps = new Properties();
+                jsonProps.put("bootstrap.servers", bootstrapServers.toString());
+                jsonProps.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+                jsonProps.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+                jsonProps.put("acks", "all");
+                jsonProps.put("retries", 3);
+                jsonProps.put("max.request.size", 10485760); // 10MB
+                
+                try (org.apache.kafka.clients.producer.KafkaProducer<String, String> producer = 
+                        new org.apache.kafka.clients.producer.KafkaProducer<>(jsonProps)) {
+                    
+                    for (int i = 0; i < messageCount; i++) {
+                        try {
+                            // 构造ProducerRecord
+                            org.apache.kafka.clients.producer.ProducerRecord<String, String> record;
+                            if (request.getPartition() != null) {
+                                record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                    request.getTopicName(), 
+                                    request.getPartition(), 
+                                    request.getKey(), 
+                                    request.getMessage()
+                                );
+                            } else if (StringUtils.hasText(request.getKey())) {
+                                record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                    request.getTopicName(), 
+                                    request.getKey(), 
+                                    request.getMessage()
+                                );
+                            } else {
+                                record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                    request.getTopicName(), 
+                                    request.getMessage()
+                                );
+                            }
+                            
+                            // 发送消息
+                            producer.send(record).get();
+                            successCount++;
+                            
+                        } catch (Exception e) {
+                            log.error("发送JSON消息失败，第{}条: {}", i + 1, e.getMessage(), e);
+                            failCount++;
                         }
-                        
-                        // 发送消息
-                        producer.send(record).get(); // 同步发送，确保成功
-                        successCount++;
-                        
-                    } catch (Exception e) {
-                        log.error("发送消息失败，第{}条: {}", i + 1, e.getMessage(), e);
-                        failCount++;
                     }
                 }
             }

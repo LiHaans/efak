@@ -121,6 +121,13 @@
         </dependency>
     </dependencies>
 
+    <repositories>
+        <repository>
+            <id>confluent</id>
+            <url>https://packages.confluent.io/maven/</url>
+        </repository>
+    </repositories>
+
     <build>
         <!-- 设置最终生成的 JAR 文件名为 KafkaEagle，这样 jps 会显示 KafkaEagle -->
         <finalName>KafkaEagle</finalName>

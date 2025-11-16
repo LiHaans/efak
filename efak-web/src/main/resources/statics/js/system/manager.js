@@ -1510,6 +1510,9 @@ window.ManagerModule.openEditClusterModal = function (clusterData) {
         $('#editSecurityConfig').hide();
     }
 
+    // 填充Schema Registry URL
+    $('#editSchemaRegistryUrl').val(clusterData.schemaRegistryUrl || '');
+
     // 填充broker节点信息（渲染为带表头的表格，单元格可编辑）
     this.loadBrokerNodes(clusterData.brokers || []);
 
@@ -1679,6 +1682,7 @@ window.ManagerModule.collectEditFormData = function () {
         type: $('#editClusterType').val(),
         securityEnabled: $('#editSecurityEnabled').is(':checked'),
         securityConfig: $('#editSecurityEnabled').is(':checked') ? $('#editSecurityJson').val() : '',
+        schemaRegistryUrl: $('#editSchemaRegistryUrl').val() || '',
         brokers: []
     };
 
