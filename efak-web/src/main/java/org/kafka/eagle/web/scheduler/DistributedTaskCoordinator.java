@@ -94,6 +94,9 @@ public class DistributedTaskCoordinator {
      */
     public void registerService() {
         try {
+            // 先清理同IP的旧节点（防止被IP去重逻辑过滤）
+            cleanupOldNodesWithSameIP();
+            
             Map<String, Object> serviceInfo = new HashMap<>();
             serviceInfo.put("nodeId", currentNodeId);
             serviceInfo.put("hostname", NetUtils.getLocalAddress());
@@ -107,8 +110,39 @@ public class DistributedTaskCoordinator {
             // 设置心跳
             updateHeartbeat();
             
+            log.info("服务注册成功: {}", currentNodeId);
         } catch (Exception e) {
             log.error("服务注册失败", e);
+        }
+    }
+    
+    /**
+     * 清理同IP的旧节点（防止IP去重逻辑导致当前节点被忽略）
+     */
+    private void cleanupOldNodesWithSameIP() {
+        try {
+            String currentIP = getServiceUniqueId(currentNodeId); // 获取当前IP:Port
+            if (currentIP == null) {
+                return;
+            }
+            
+            Set<Object> allServices = redisTemplate.opsForHash().keys(SERVICE_REGISTRY_KEY);
+            for (Object serviceKey : allServices) {
+                String nodeId = serviceKey.toString();
+                if (nodeId.contains(":") || nodeId.equals(currentNodeId)) {
+                    continue; // 跳过附加信息和当前节点
+                }
+                
+                String nodeIP = getServiceUniqueId(nodeId);
+                if (currentIP.equals(nodeIP)) {
+                    // 同IP的旧节点，清理
+                    log.warn("清理同IP的旧节点: {} (IP: {})", nodeId, nodeIP);
+                    redisTemplate.opsForHash().delete(SERVICE_REGISTRY_KEY, nodeId);
+                    redisTemplate.delete(SERVICE_HEARTBEAT_KEY + nodeId);
+                }
+            }
+        } catch (Exception e) {
+            log.error("清理旧节点失败", e);
         }
     }
     
@@ -373,6 +407,13 @@ public class DistributedTaskCoordinator {
         log.info("=== 分片诊断: 消费者组分片 ===");
         log.info("当前currentNodeId: {}", currentNodeId);
         
+        // 确保当前节点已注册（防止热重载后未重新注册）
+        String heartbeatKey = SERVICE_HEARTBEAT_KEY + currentNodeId;
+        if (!redisTemplate.hasKey(heartbeatKey)) {
+            log.warn("当前节点未注册到Redis，立即注册");
+            registerService();
+        }
+        
         List<String> onlineServices = getOnlineServices();
         log.info("在线服务列表: {}", onlineServices);
         
@@ -398,7 +439,7 @@ public class DistributedTaskCoordinator {
         log.info("当前节点索引: {}", currentNodeIndex);
         
         if (currentNodeIndex == -1) {
-            log.warn("!!! 当前节点不在在线服务列表中，处理所有消费者组 !!!");
+            log.warn("!!! 当前节点仍不在在线服务列表中（可能被IP去重），单独处理所有消费者组 !!!");
             return consumerGroups;
         }
         
