@@ -1389,3 +1389,10 @@ async function sendMessage(event) {
         sendBtn.innerHTML = originalBtnHtml;
     }
 }
+
+// ==================== 导出全局函数供HTML onclick使用 ====================
+window.openSendMessageModal = openSendMessageModal;
+window.closeSendMessageModal = closeSendMessageModal;
+window.closeSendMessageOnOverlay = closeSendMessageOnOverlay;
+window.onFormatChange = onFormatChange;
+window.sendMessage = sendMessage;
