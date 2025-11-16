@@ -370,7 +370,12 @@ public class DistributedTaskCoordinator {
             return Collections.emptyList();
         }
         
+        log.info("=== 分片诊断: 消费者组分片 ===");
+        log.info("当前currentNodeId: {}", currentNodeId);
+        
         List<String> onlineServices = getOnlineServices();
+        log.info("在线服务列表: {}", onlineServices);
+        
         if (onlineServices.isEmpty()) {
             log.warn("没有在线服务，当前节点处理所有消费者组");
             return consumerGroups;
@@ -378,16 +383,22 @@ public class DistributedTaskCoordinator {
         
         // 使用唯一在线服务数量判断是否需要分片
         int uniqueServiceCount = getUniqueOnlineServiceCount();
+        log.info("唯一服务数量: {}", uniqueServiceCount);
+        
         if (uniqueServiceCount == 1) {
+            log.info("只有1个服务，返回所有消费者组");
             return consumerGroups;
         }
         
         // 对服务列表排序，确保所有节点的分片结果一致
         Collections.sort(onlineServices);
+        log.info("排序后的服务列表: {}", onlineServices);
         
         int currentNodeIndex = onlineServices.indexOf(currentNodeId);
+        log.info("当前节点索引: {}", currentNodeIndex);
+        
         if (currentNodeIndex == -1) {
-            log.warn("当前节点不在在线服务列表中，处理所有消费者组");
+            log.warn("!!! 当前节点不在在线服务列表中，处理所有消费者组 !!!");
             return consumerGroups;
         }
         
