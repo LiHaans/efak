@@ -1243,10 +1243,11 @@ function initializePartitionSelect() {
 }
 
 // 格式切换事件
-function onFormatChange() {
+async function onFormatChange() {
     const format = document.querySelector('input[name="messageFormat"]:checked').value;
     const messageContent = document.getElementById('sendMessageContent');
     const schemaSection = document.getElementById('avroSchemaSection');
+    const schemaTextarea = document.getElementById('sendSchema');
     
     if (format === 'json') {
         // JSON格式：隐藏Schema输入区
@@ -1256,6 +1257,43 @@ function onFormatChange() {
         // Avro格式：显示Schema输入区
         schemaSection.style.display = 'block';
         messageContent.placeholder = '{"name": "John", "age": 30}';
+        
+        // 自动从Schema Registry获取Schema
+        const topicName = document.getElementById('sendTopicName').value;
+        const urlParams = new URLSearchParams(window.location.search);
+        const clusterId = urlParams.get('cid');
+        
+        if (topicName && clusterId) {
+            try {
+                // 显示加载状态
+                schemaTextarea.value = '正在从Schema Registry获取Schema...';
+                schemaTextarea.disabled = true;
+                
+                const response = await fetch(`/topic/api/schema/${encodeURIComponent(topicName)}?clusterId=${encodeURIComponent(clusterId)}`);
+                const result = await response.json();
+                
+                if (result.success && result.schema) {
+                    // 格弊化Schema以便阅读
+                    try {
+                        const schemaObj = JSON.parse(result.schema);
+                        schemaTextarea.value = JSON.stringify(schemaObj, null, 2);
+                        showNotification('已自动获取Topic的Avro Schema', 'success');
+                    } catch (e) {
+                        // 如果已经是格弊化的，直接使用
+                        schemaTextarea.value = result.schema;
+                    }
+                } else {
+                    schemaTextarea.value = '';
+                    showNotification('该Topic没有注册Avro Schema，请手动输入', 'warning');
+                }
+            } catch (error) {
+                console.error('获取Schema失败:', error);
+                schemaTextarea.value = '';
+                showNotification('获取Schema失败，请手动输入', 'error');
+            } finally {
+                schemaTextarea.disabled = false;
+            }
+        }
     }
 }
 

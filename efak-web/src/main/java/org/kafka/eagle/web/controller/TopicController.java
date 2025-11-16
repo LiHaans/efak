@@ -635,6 +635,38 @@ public class TopicController {
     }
 
     /**
+     * 获取Topic的Avro Schema（从schema Registry）
+     */
+    @GetMapping("/api/schema/{topicName}")
+    @ResponseBody
+    public ResponseEntity<Map<String, Object>> getTopicSchema(
+            @PathVariable String topicName,
+            @RequestParam(value = "clusterId", required = true) String clusterId) {
+        
+        Map<String, Object> result = new HashMap<>();
+        
+        try {
+            String schema = topicService.getTopicSchemaFromRegistry(topicName, clusterId);
+            
+            if (schema != null) {
+                result.put("success", true);
+                result.put("schema", schema);
+            } else {
+                result.put("success", false);
+                result.put("message", "该Topic没有注册Avro Schema");
+            }
+            
+            return ResponseEntity.ok(result);
+            
+        } catch (Exception e) {
+            log.error("获取Topic Schema失败：{}", e.getMessage(), e);
+            result.put("success", false);
+            result.put("message", "获取Schema失败：" + e.getMessage());
+            return ResponseEntity.ok(result);
+        }
+    }
+    
+    /**
      * 发送消息到指定Topic
      */
     @PostMapping("/api/send-message")

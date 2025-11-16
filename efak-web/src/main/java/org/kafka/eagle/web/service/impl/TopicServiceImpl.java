@@ -1198,4 +1198,59 @@ public class TopicServiceImpl implements TopicService {
         
         return result;
     }
+    
+    @Override
+    public String getTopicSchemaFromRegistry(String topicName, String clusterId) {
+        try {
+            // 1. 获取集群的Schema Registry URL
+            KafkaClusterInfo clusterInfo = clusterMapper.findByClusterId(clusterId);
+            if (clusterInfo == null || !StringUtils.hasText(clusterInfo.getSchemaRegistryUrl())) {
+                log.warn("集群 {} 未配置Schema Registry URL", clusterId);
+                return null;
+            }
+            
+            String schemaRegistryUrl = clusterInfo.getSchemaRegistryUrl();
+            
+            // 2. 构造Schema Registry API URL
+            // Schema Registry的命名规则：{topicName}-value 或 {topicName}-key
+            // 这里获取value的schema（消息内容）
+            String subject = topicName + "-value";
+            String apiUrl = schemaRegistryUrl + "/subjects/" + subject + "/versions/latest";
+            
+            log.info("获取Topic {} 的Schema，API URL: {}", topicName, apiUrl);
+            
+            // 3. 调用Schema Registry API
+            java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
+                    .uri(java.net.URI.create(apiUrl))
+                    .header("Accept", "application/json")
+                    .GET()
+                    .build();
+            
+            java.net.http.HttpResponse<String> response = client.send(request, 
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+            
+            // 4. 解析响应
+            if (response.statusCode() == 200) {
+                // 解析JSON获取schema字段
+                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                com.fasterxml.jackson.databind.JsonNode jsonNode = mapper.readTree(response.body());
+                String schema = jsonNode.get("schema").asText();
+                
+                log.info("成功获取Topic {} 的Schema", topicName);
+                return schema;
+            } else if (response.statusCode() == 404) {
+                log.warn("Topic {} 没有注册Schema到Schema Registry", topicName);
+                return null;
+            } else {
+                log.error("获取Schema失败，HTTP状态码: {}, 响应: {}", 
+                        response.statusCode(), response.body());
+                return null;
+            }
+            
+        } catch (Exception e) {
+            log.error("从Schema Registry获取Topic {} 的Schema失败：{}", topicName, e.getMessage(), e);
+            return null;
+        }
+    }
 }

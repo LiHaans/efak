@@ -161,4 +161,13 @@ public interface TopicService {
      * @return 发送结果
      */
     Map<String, Object> sendMessage(org.kafka.eagle.dto.topic.TopicMessageSendRequest request);
+    
+    /**
+     * 从Schema Registry获取Topic的Avro Schema
+     *
+     * @param topicName 主题名称
+     * @param clusterId 集群ID
+     * @return Schema JSON字符串，如果不存在返回null
+     */
+    String getTopicSchemaFromRegistry(String topicName, String clusterId);
 }
