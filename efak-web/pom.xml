@@ -107,6 +107,18 @@
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
+        <!-- Avro序列化支持 -->
+        <dependency>
+            <groupId>org.apache.avro</groupId>
+            <artifactId>avro</artifactId>
+            <version>1.11.3</version>
+        </dependency>
+        <!-- Kafka Avro Serializer和Schema Registry客户端 -->
+        <dependency>
+            <groupId>io.confluent</groupId>
+            <artifactId>kafka-avro-serializer</artifactId>
+            <version>7.5.0</version>
+        </dependency>
     </dependencies>
 
     <build>

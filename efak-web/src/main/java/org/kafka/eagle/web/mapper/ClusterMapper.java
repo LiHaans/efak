@@ -76,18 +76,18 @@ public interface ClusterMapper {
                        @Param("clusterType") String clusterType,
                        @Param("auth") String auth);
 
-    @Select("SELECT id, cluster_id as clusterId, cluster_name as name, cluster_type as clusterType, auth, auth_config as authConfig, availability, created_time as createdAt, updated_time as updatedAt FROM ke_cluster WHERE id = #{id}")
+    @Select("SELECT id, cluster_id as clusterId, cluster_name as name, cluster_type as clusterType, auth, auth_config as authConfig, schema_registry_url as schemaRegistryUrl, availability, created_time as createdAt, updated_time as updatedAt FROM ke_cluster WHERE id = #{id}")
     KafkaClusterInfo getById(@Param("id") Long id);
 
-    @Select("SELECT id, cluster_id as clusterId, cluster_name as name, cluster_type as clusterType, auth, auth_config as authConfig, availability, created_time as createdAt, updated_time as updatedAt FROM ke_cluster WHERE cluster_id = #{clusterId}")
+    @Select("SELECT id, cluster_id as clusterId, cluster_name as name, cluster_type as clusterType, auth, auth_config as authConfig, schema_registry_url as schemaRegistryUrl, availability, created_time as createdAt, updated_time as updatedAt FROM ke_cluster WHERE cluster_id = #{clusterId}")
     KafkaClusterInfo findByClusterId(@Param("clusterId") String clusterId);
 
-    @Insert("INSERT INTO ke_cluster (cluster_id, cluster_name, cluster_type, auth, auth_config, availability, created_time, updated_time) " +
-            "VALUES (#{clusterId}, #{name}, #{clusterType}, #{auth}, #{authConfig}, #{availability}, NOW(), NOW())")
+    @Insert("INSERT INTO ke_cluster (cluster_id, cluster_name, cluster_type, auth, auth_config, schema_registry_url, availability, created_time, updated_time) " +
+            "VALUES (#{clusterId}, #{name}, #{clusterType}, #{auth}, #{authConfig}, #{schemaRegistryUrl}, #{availability}, NOW(), NOW())")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insertCluster(KafkaClusterInfo info);
 
-    @Update("UPDATE ke_cluster SET cluster_name = #{name}, cluster_type = #{clusterType}, auth = #{auth}, auth_config = #{authConfig}, availability = #{availability}, updated_time = NOW() WHERE id = #{id}")
+    @Update("UPDATE ke_cluster SET cluster_name = #{name}, cluster_type = #{clusterType}, auth = #{auth}, auth_config = #{authConfig}, schema_registry_url = #{schemaRegistryUrl}, availability = #{availability}, updated_time = NOW() WHERE id = #{id}")
     int updateCluster(KafkaClusterInfo info);
 
     @Update("UPDATE ke_cluster SET total_nodes = #{nodes}, online_nodes = #{onlineNodes}, availability = #{availability}, updated_time = NOW() WHERE cluster_id = #{clusterId}")
