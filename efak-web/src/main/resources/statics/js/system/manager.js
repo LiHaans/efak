@@ -1146,6 +1146,7 @@ window.ManagerModule.submitSingleNode = async function () {
     const jmxPort = (document.getElementById('jmxPort') || {}).value;
     const securityEnabled = (document.getElementById('securityEnabled') || {}).checked;
     const securityJson = (document.getElementById('securityJson') || {}).value;
+    const schemaRegistryUrl = (document.getElementById('schemaRegistryUrl') || {}).value;
 
     if (!clusterName || !environmentType || !brokerId || !hostIp) {
         this.showModalMessage('请填写所有必填字段', 'error');
@@ -1158,6 +1159,7 @@ window.ManagerModule.submitSingleNode = async function () {
         clusterType: environmentType,
         auth: securityEnabled ? 'Y' : 'N',
         authConfig: securityEnabled ? securityJson : null,
+        schemaRegistryUrl: schemaRegistryUrl || null,
         creator: this.getCreator(),
         nodes: [{
             brokerId: parseInt(brokerId, 10),
@@ -1197,6 +1199,7 @@ window.ManagerModule.submitBatchImport = async function () {
     const fileInput = document.getElementById('excelFile');
     const securityEnabled = (document.getElementById('securityEnabled') || {}).checked;
     const securityJson = (document.getElementById('securityJson') || {}).value;
+    const schemaRegistryUrl = (document.getElementById('schemaRegistryUrl') || {}).value;
 
     if (!clusterName || !environmentType) {
         this.showModalMessage('请填写集群名称和环境类型', 'error');
@@ -1238,6 +1241,7 @@ window.ManagerModule.submitBatchImport = async function () {
             clusterType: environmentType,
             auth: securityEnabled ? 'Y' : 'N',
             authConfig: securityEnabled ? securityJson : null,
+            schemaRegistryUrl: schemaRegistryUrl || null,
             creator: this.getCreator(),
             nodes: nodes
         };
