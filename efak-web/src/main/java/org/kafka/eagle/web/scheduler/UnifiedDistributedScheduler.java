@@ -113,9 +113,49 @@ public class UnifiedDistributedScheduler {
 
     @PreDestroy
     public void destroy() {
-        log.info("销毁统一分布式任务调度器");
-        stopScheduler();
-        schedulerExecutor.shutdown();
+        log.info("开始销毁统一分布式任务调度器");
+        
+        try {
+            // 1. 禁用调度器，阻止新任务提交
+            stopScheduler();
+            
+            // 2. 关闭线程池，不再接受新任务
+            schedulerExecutor.shutdown();
+            
+            // 3. 等待正在执行的任务完成（最多15秒）
+            if (!schedulerExecutor.awaitTermination(15, TimeUnit.SECONDS)) {
+                log.warn("调度器未能在15秒内正常关闭，强制终止");
+                
+                // 4. 强制终止所有任务
+                List<Runnable> pendingTasks = schedulerExecutor.shutdownNow();
+                log.info("强制终止了{}个待执行的任务", pendingTasks.size());
+                
+                // 5. 再等待10秒确保线程池关闭
+                if (!schedulerExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    log.error("调度器线程池无法关闭，可能存在卡住的线程");
+                }
+            } else {
+                log.info("调度器线程池已正常关闭");
+            }
+            
+            // 6. 关闭TimeoutWrapper的线程池
+            try {
+                org.kafka.eagle.core.util.TimeoutWrapper.shutdown();
+                log.info("TimeoutWrapper线程池已关闭");
+            } catch (Exception ex) {
+                log.warn("关闭TimeoutWrapper时出现异常", ex);
+            }
+            
+            log.info("统一分布式任务调度器销毁完成");
+            
+        } catch (InterruptedException e) {
+            log.error("调度器关闭过程被中断", e);
+            Thread.currentThread().interrupt();
+            // 中断时也尝试强制关闭
+            schedulerExecutor.shutdownNow();
+        } catch (Exception e) {
+            log.error("调度器销毁过程出现异常", e);
+        }
     }
 
     /**

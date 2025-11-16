@@ -9,6 +9,10 @@ spring:
     allow-circular-references: true
     allow-bean-definition-overriding: true
   
+  # 优雅关闭配置 - 等待正在执行的请求完成
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  
   # Web Configuration
   web:
     resources:
@@ -75,6 +79,8 @@ server:
     include-binding-errors: always
     include-stacktrace: never
     include-exception: false
+  # 优雅关闭配置 - 解决IDEA停止后端口占用问题
+  shutdown: graceful
 
 # Logging Configuration
 logging:
