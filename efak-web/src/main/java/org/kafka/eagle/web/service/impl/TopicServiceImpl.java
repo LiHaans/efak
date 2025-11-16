@@ -978,4 +978,138 @@ public class TopicServiceImpl implements TopicService {
 
         return result;
     }
+
+    @Override
+    public Map<String, Object> sendMessage(org.kafka.eagle.dto.topic.TopicMessageSendRequest request) {
+        Map<String, Object> result = new HashMap<>();
+        
+        try {
+            // 参数校验
+            if (request == null || !StringUtils.hasText(request.getTopicName()) 
+                    || !StringUtils.hasText(request.getClusterId())) {
+                result.put("success", false);
+                result.put("message", "参数不完整：Topic名称和集群ID不能为空");
+                return result;
+            }
+            
+            if (!StringUtils.hasText(request.getMessage())) {
+                result.put("success", false);
+                result.put("message", "消息内容不能为空");
+                return result;
+            }
+            
+            // 获取集群broker信息
+            List<BrokerInfo> brokerInfos = brokerMapper.getBrokersByClusterId(request.getClusterId());
+            if (brokerInfos.isEmpty()) {
+                result.put("success", false);
+                result.put("message", "集群 " + request.getClusterId() + " 没有可用的broker信息");
+                return result;
+            }
+            
+            // 构造broker地址
+            StringBuilder bootstrapServers = new StringBuilder();
+            for (int i = 0; i < brokerInfos.size(); i++) {
+                BrokerInfo broker = brokerInfos.get(i);
+                bootstrapServers.append(broker.getHostIp()).append(":").append(broker.getPort());
+                if (i < brokerInfos.size() - 1) {
+                    bootstrapServers.append(",");
+                }
+            }
+            
+            // 创建KafkaProducer配置
+            Properties props = new Properties();
+            props.put("bootstrap.servers", bootstrapServers.toString());
+            props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+            props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+            props.put("acks", "all"); // 确保消息可靠性
+            props.put("retries", 3);
+            props.put("max.request.size", 10485760); // 10MB
+            
+            int successCount = 0;
+            int failCount = 0;
+            int messageCount = request.getCount() != null && request.getCount() > 0 ? request.getCount() : 1;
+            
+            try (org.apache.kafka.clients.producer.KafkaProducer<String, String> producer = 
+                    new org.apache.kafka.clients.producer.KafkaProducer<>(props)) {
+                
+                for (int i = 0; i < messageCount; i++) {
+                    try {
+                        // 根据格式处理消息
+                        String messageContent = request.getMessage();
+                        
+                        // 如果是JSON格式，验证JSON合法性
+                        if ("json".equalsIgnoreCase(request.getFormat())) {
+                            try {
+                                // 简单验证JSON格式
+                                new com.fasterxml.jackson.databind.ObjectMapper().readTree(messageContent);
+                            } catch (Exception e) {
+                                result.put("success", false);
+                                result.put("message", "JSON格式错误: " + e.getMessage());
+                                return result;
+                            }
+                        }
+                        // TODO: Avro格式处理需要Schema Registry支持，后续实现
+                        
+                        // 构造ProducerRecord
+                        org.apache.kafka.clients.producer.ProducerRecord<String, String> record;
+                        if (request.getPartition() != null) {
+                            // 指定分区
+                            record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                request.getTopicName(), 
+                                request.getPartition(), 
+                                request.getKey(), 
+                                messageContent
+                            );
+                        } else if (StringUtils.hasText(request.getKey())) {
+                            // 有Key但不指定分区
+                            record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                request.getTopicName(), 
+                                request.getKey(), 
+                                messageContent
+                            );
+                        } else {
+                            // 没有Key也没有指定分区
+                            record = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                                request.getTopicName(), 
+                                messageContent
+                            );
+                        }
+                        
+                        // 发送消息
+                        producer.send(record).get(); // 同步发送，确保成功
+                        successCount++;
+                        
+                    } catch (Exception e) {
+                        log.error("发送消息失败，第{}条: {}", i + 1, e.getMessage(), e);
+                        failCount++;
+                    }
+                }
+            }
+            
+            // 返回结果
+            if (failCount == 0) {
+                result.put("success", true);
+                result.put("message", "发送成功");
+                result.put("successCount", successCount);
+                result.put("failCount", 0);
+            } else if (successCount > 0) {
+                result.put("success", true);
+                result.put("message", "部分成功");
+                result.put("successCount", successCount);
+                result.put("failCount", failCount);
+            } else {
+                result.put("success", false);
+                result.put("message", "全部失败");
+                result.put("successCount", 0);
+                result.put("failCount", failCount);
+            }
+            
+        } catch (Exception e) {
+            log.error("发送消息异常: {}", e.getMessage(), e);
+            result.put("success", false);
+            result.put("message", "发送失败: " + e.getMessage());
+        }
+        
+        return result;
+    }
 }

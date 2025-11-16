@@ -633,4 +633,69 @@ public class TopicController {
             return ResponseEntity.ok(result);
         }
     }
+
+    /**
+     * 发送消息到指定Topic
+     */
+    @PostMapping("/api/send-message")
+    @ResponseBody
+    public ResponseEntity<Map<String, Object>> sendMessage(
+            Authentication authentication,
+            @RequestBody org.kafka.eagle.dto.topic.TopicMessageSendRequest request) {
+        
+        Map<String, Object> result = new HashMap<>();
+        
+        try {
+            // 参数验证
+            if (request == null) {
+                result.put("success", false);
+                result.put("message", "请求参数不能为空");
+                return ResponseEntity.ok(result);
+            }
+            
+            if (request.getTopicName() == null || request.getTopicName().trim().isEmpty()) {
+                result.put("success", false);
+                result.put("message", "Topic名称不能为空");
+                return ResponseEntity.ok(result);
+            }
+            
+            if (request.getClusterId() == null || request.getClusterId().trim().isEmpty()) {
+                result.put("success", false);
+                result.put("message", "集群ID不能为空");
+                return ResponseEntity.ok(result);
+            }
+            
+            if (request.getMessage() == null || request.getMessage().trim().isEmpty()) {
+                result.put("success", false);
+                result.put("message", "消息内容不能为空");
+                return ResponseEntity.ok(result);
+            }
+            
+            // 验证格式
+            String format = request.getFormat();
+            if (format == null || format.trim().isEmpty()) {
+                format = "json"; // 默认json
+                request.setFormat(format);
+            } else if (!"json".equalsIgnoreCase(format) && !"avro".equalsIgnoreCase(format)) {
+                result.put("success", false);
+                result.put("message", "不支持的格式，只支持json和avro");
+                return ResponseEntity.ok(result);
+            }
+            
+            // 记录操作用户
+            String username = authentication != null ? authentication.getName() : "unknown";
+            log.info("用户 {} 请求向Topic {} 发送消息，格式: {}", username, request.getTopicName(), format);
+            
+            // 调用Service发送消息
+            Map<String, Object> sendResult = topicService.sendMessage(request);
+            
+            return ResponseEntity.ok(sendResult);
+            
+        } catch (Exception e) {
+            log.error("发送消息失败：{}", e.getMessage(), e);
+            result.put("success", false);
+            result.put("message", "发送失败：" + e.getMessage());
+            return ResponseEntity.ok(result);
+        }
+    }
 }

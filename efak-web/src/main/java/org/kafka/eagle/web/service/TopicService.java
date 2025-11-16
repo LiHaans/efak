@@ -146,12 +146,19 @@ public interface TopicService {
      * @return 消费者组分页数据
      */
     Map<String, Object> getTopicConsumerGroups(String topicName, String clusterId, Integer page, Integer pageSize);
-
     /**
-     * 从Kafka集群同步所有Topic到数据库
+     * 从 Kafka集群同步所有Topic到数据库
      *
      * @param clusterId 集群ID
      * @return 同步结果信息（新增、更新、总数等）
      */
     Map<String, Object> syncTopicsFromKafka(String clusterId);
+
+    /**
+     * 发送消息到指定Topic
+     *
+     * @param request 消息发送请求
+     * @return 发送结果
+     */
+    Map<String, Object> sendMessage(org.kafka.eagle.dto.topic.TopicMessageSendRequest request);
 }

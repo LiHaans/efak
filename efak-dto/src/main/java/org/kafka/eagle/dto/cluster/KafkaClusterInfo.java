@@ -66,6 +66,11 @@ public class KafkaClusterInfo {
     private String authConfig;
 
     /**
+     * Schema Registry URL（用于Avro消息序列化）
+     */
+    private String schemaRegistryUrl;
+
+    /**
      * 集群可用性百分比
      */
     private BigDecimal availability;
