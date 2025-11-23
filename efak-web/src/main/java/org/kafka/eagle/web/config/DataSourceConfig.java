@@ -69,7 +69,7 @@ public class DataSourceConfig {
 
         } catch (Exception e) {
             log.error("数据库连接失败，使用H2内存数据库: {}", e.getMessage());
-
+            e.printStackTrace();
             // 降级到H2内存数据库
             return DataSourceBuilder.create()
                     .url("jdbc:h2:mem:efak;DB_CLOSE_DELAY=-1")

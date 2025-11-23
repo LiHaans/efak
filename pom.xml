@@ -6,7 +6,7 @@
 
     <properties>
         <kafka.eagle.version>5.0.0</kafka.eagle.version>
-        <kafka.version>4.0.0</kafka.version>
+        <kafka.version>2.7.2</kafka.version>
         <endorsed.dir>${project.build.directory}/endorsed</endorsed.dir>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>17</maven.compiler.source>

@@ -166,11 +166,11 @@ public class KafkaSchemaFactory {
                     throw e;
                 }
                 return result;
-            }, 30, java.util.concurrent.TimeUnit.SECONDS, 
+            }, 60*5, java.util.concurrent.TimeUnit.SECONDS,
                 "listTopicNames-" + clientInfo.getClusterId());
             
         } catch (java.util.concurrent.TimeoutException e) {
-            log.error("获取集群 '{}' 的主题列表超时（>30s）", clientInfo.getClusterId());
+            log.error("获取集群 '{}' 的主题列表超时（>5m）", clientInfo.getClusterId());
             // 超时时返回空集合，继续处理其他集群
         } catch (Exception e) {
             log.error("列出 '{}' 的主题失败：", clientInfo, e);
@@ -191,7 +191,10 @@ public class KafkaSchemaFactory {
         try {
             wrapper = plugin.getClientPool().borrowClient(clientInfo);
             DescribeTopicsResult result = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
-            result.allTopicNames().get().get(topic).partitions().forEach(tp -> partitions.add(tp.partition()));
+            TopicDescription description = result.values().get(topic).get();
+            if (description != null) {
+                description.partitions().forEach(tp -> partitions.add(tp.partition()));
+            }
         } catch (Exception e) {
             log.error("获取主题 '{}' 的分区列表失败（{}）：", topic, clientInfo, e);
         } finally {
@@ -414,7 +417,11 @@ public class KafkaSchemaFactory {
             Map<ConfigResource, Config> topicConfigDescMap = describeConfigsResult.all().get();
 
             // 3. Process each topic
-            for (Map.Entry<String, TopicDescription> entry : describeTopicsResult.allTopicNames().get().entrySet()) {
+            Map<String, TopicDescription> topicDescriptionMap = new HashMap<>();
+            for (String topic : topics) {
+                topicDescriptionMap.put(topic, describeTopicsResult.values().get(topic).get());
+            }
+            for (Map.Entry<String, TopicDescription> entry : topicDescriptionMap.entrySet()) {
                 String topicName = entry.getKey();
                 TopicDescription description = entry.getValue();
 
@@ -608,7 +615,7 @@ public class KafkaSchemaFactory {
         try {
             wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
             DescribeTopicsResult describeTopicsResult = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
-            TopicDescription description = describeTopicsResult.allTopicNames().get().get(topic);
+            TopicDescription description = describeTopicsResult.values().get(topic).get();
 
             if (description != null) {
                 for (TopicPartitionInfo partitionInfo : description.partitions()) {
@@ -682,8 +689,7 @@ public class KafkaSchemaFactory {
             wrapper = plugin.getClientPool().borrowClient(kafkaClientInfo);
             DescribeTopicsResult describeTopicsResult = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
 
-            Map<String, TopicDescription> topicDescriptions = describeTopicsResult.allTopicNames().get();
-            TopicDescription topicDescription = topicDescriptions.get(topic);
+            TopicDescription topicDescription = describeTopicsResult.values().get(topic).get();
 
             if (topicDescription == null) {
                 log.warn("在集群 '{}' 中未找到主题 '{}'", topic, kafkaClientInfo.getClusterId());
@@ -1079,7 +1085,7 @@ public class KafkaSchemaFactory {
 
             // 1. 获取 topic 的分区信息
             DescribeTopicsResult describeTopicsResult = wrapper.getAdminClient().describeTopics(Collections.singleton(topic));
-            TopicDescription topicDescription = describeTopicsResult.topicNameValues().get(topic).get();
+            TopicDescription topicDescription = describeTopicsResult.values().get(topic).get();
 
             List<TopicPartition> partitions = new ArrayList<>();
             for (TopicPartitionInfo pInfo : topicDescription.partitions()) {
@@ -1092,15 +1098,16 @@ public class KafkaSchemaFactory {
             switch (mode.toLowerCase()) {
                 case "earliest":
                 case "latest": {
-                    // 使用 AdminClient 的 ListOffsets API
-                    Map<TopicPartition, OffsetSpec> request = new HashMap<>();
-                    for (TopicPartition tp : partitions) {
-                        request.put(tp, mode.equals("earliest") ? OffsetSpec.earliest() : OffsetSpec.latest());
-                    }
-                    ListOffsetsResult offsetsResult = wrapper.getAdminClient().listOffsets(request);
-                    for (TopicPartition tp : partitions) {
-                        long offset = offsetsResult.partitionResult(tp).get().offset();
-                        newOffsets.put(tp, new OffsetAndMetadata(offset));
+                    // 使用 KafkaConsumer API 以兼容 Kafka 2.7.2
+                    try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(plugin.buildConsumerProps(clientInfo))) {
+                        Set<TopicPartition> tpSet = new HashSet<>(partitions);
+                        consumer.assign(tpSet);
+                        Map<TopicPartition, Long> offsets = mode.equals("earliest") 
+                            ? consumer.beginningOffsets(tpSet) 
+                            : consumer.endOffsets(tpSet);
+                        for (TopicPartition tp : partitions) {
+                            newOffsets.put(tp, new OffsetAndMetadata(offsets.get(tp)));
+                        }
                     }
                     break;
                 }
@@ -1121,23 +1128,30 @@ public class KafkaSchemaFactory {
                         log.error("时间戳模式需要值");
                         return false;
                     }
-                    Map<TopicPartition, OffsetSpec> request = new HashMap<>();
-                    for (TopicPartition tp : partitions) {
-                        request.put(tp, OffsetSpec.forTimestamp(value));
-                    }
-                    ListOffsetsResult offsetsResult = wrapper.getAdminClient().listOffsets(request);
-                    for (TopicPartition tp : partitions) {
-                        ListOffsetsResult.ListOffsetsResultInfo info = offsetsResult.partitionResult(tp).get();
-                        if (info != null && info.offset() >= 0) {
-                            newOffsets.put(tp, new OffsetAndMetadata(info.offset()));
-                        } else {
-                            log.warn("No valid offset found for partition {} at timestamp {}", tp.partition(), value);
-                            // 如果指定时间戳没有找到对应的偏移量，使用最早的偏移量
-                            Map<TopicPartition, OffsetSpec> fallbackRequest = new HashMap<>();
-                            fallbackRequest.put(tp, OffsetSpec.earliest());
-                            ListOffsetsResult fallbackResult = wrapper.getAdminClient().listOffsets(fallbackRequest);
-                            long fallbackOffset = fallbackResult.partitionResult(tp).get().offset();
-                            newOffsets.put(tp, new OffsetAndMetadata(fallbackOffset));
+                    // 使用 KafkaConsumer offsetsForTimes API 以兼容 Kafka 2.7.2
+                    try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(plugin.buildConsumerProps(clientInfo))) {
+                        Set<TopicPartition> tpSet = new HashSet<>(partitions);
+                        consumer.assign(tpSet);
+                        
+                        // 构建时间戳查询请求
+                        Map<TopicPartition, Long> timestampsToSearch = new HashMap<>();
+                        for (TopicPartition tp : partitions) {
+                            timestampsToSearch.put(tp, value);
+                        }
+                        
+                        Map<TopicPartition, org.apache.kafka.clients.consumer.OffsetAndTimestamp> offsetsForTimes = 
+                            consumer.offsetsForTimes(timestampsToSearch);
+                        
+                        for (TopicPartition tp : partitions) {
+                            org.apache.kafka.clients.consumer.OffsetAndTimestamp offsetAndTimestamp = offsetsForTimes.get(tp);
+                            if (offsetAndTimestamp != null) {
+                                newOffsets.put(tp, new OffsetAndMetadata(offsetAndTimestamp.offset()));
+                            } else {
+                                log.warn("No valid offset found for partition {} at timestamp {}, using earliest", tp.partition(), value);
+                                // 如果指定时间戳没有找到对应的偏移量，使用最早的偏移量
+                                Map<TopicPartition, Long> beginningOffsets = consumer.beginningOffsets(Collections.singleton(tp));
+                                newOffsets.put(tp, new OffsetAndMetadata(beginningOffsets.get(tp)));
+                            }
                         }
                     }
                     break;
@@ -1208,14 +1222,16 @@ public class KafkaSchemaFactory {
                 switch (mode.toLowerCase()) {
                     case "earliest":
                     case "latest": {
-                        Map<TopicPartition, OffsetSpec> request = new HashMap<>();
-                        for (TopicPartition tp : partitions) {
-                            request.put(tp, mode.equals("earliest") ? OffsetSpec.earliest() : OffsetSpec.latest());
-                        }
-                        ListOffsetsResult offsetsRes = wrapper.getAdminClient().listOffsets(request);
-                        for (TopicPartition tp : partitions) {
-                            long offset = offsetsRes.partitionResult(tp).get().offset();
-                            newOffsets.put(tp, new OffsetAndMetadata(offset));
+                        // 使用 KafkaConsumer API 以兼容 Kafka 2.7.2
+                        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(plugin.buildConsumerProps(clientInfo))) {
+                            Set<TopicPartition> tpSet = new HashSet<>(partitions);
+                            consumer.assign(tpSet);
+                            Map<TopicPartition, Long> offsets = mode.equals("earliest") 
+                                ? consumer.beginningOffsets(tpSet) 
+                                : consumer.endOffsets(tpSet);
+                            for (TopicPartition tp : partitions) {
+                                newOffsets.put(tp, new OffsetAndMetadata(offsets.get(tp)));
+                            }
                         }
                         break;
                     }
@@ -1236,22 +1252,29 @@ public class KafkaSchemaFactory {
                             log.error("Value is required for timestamp mode");
                             return false;
                         }
-                        Map<TopicPartition, OffsetSpec> request = new HashMap<>();
-                        for (TopicPartition tp : partitions) {
-                            request.put(tp, OffsetSpec.forTimestamp(value));
-                        }
-                        ListOffsetsResult offsetsRes = wrapper.getAdminClient().listOffsets(request);
-                        for (TopicPartition tp : partitions) {
-                            ListOffsetsResult.ListOffsetsResultInfo info = offsetsRes.partitionResult(tp).get();
-                            if (info != null && info.offset() >= 0) {
-                                newOffsets.put(tp, new OffsetAndMetadata(info.offset()));
-                            } else {
-                                // 如果指定时间戳没有找到对应的偏移量，使用最早的偏移量
-                                Map<TopicPartition, OffsetSpec> fallbackRequest = new HashMap<>();
-                                fallbackRequest.put(tp, OffsetSpec.earliest());
-                                ListOffsetsResult fallbackResult = wrapper.getAdminClient().listOffsets(fallbackRequest);
-                                long fallbackOffset = fallbackResult.partitionResult(tp).get().offset();
-                                newOffsets.put(tp, new OffsetAndMetadata(fallbackOffset));
+                        // 使用 KafkaConsumer offsetsForTimes API 以兼容 Kafka 2.7.2
+                        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(plugin.buildConsumerProps(clientInfo))) {
+                            Set<TopicPartition> tpSet = new HashSet<>(partitions);
+                            consumer.assign(tpSet);
+                            
+                            // 构建时间戳查询请求
+                            Map<TopicPartition, Long> timestampsToSearch = new HashMap<>();
+                            for (TopicPartition tp : partitions) {
+                                timestampsToSearch.put(tp, value);
+                            }
+                            
+                            Map<TopicPartition, org.apache.kafka.clients.consumer.OffsetAndTimestamp> offsetsForTimes = 
+                                consumer.offsetsForTimes(timestampsToSearch);
+                            
+                            for (TopicPartition tp : partitions) {
+                                org.apache.kafka.clients.consumer.OffsetAndTimestamp offsetAndTimestamp = offsetsForTimes.get(tp);
+                                if (offsetAndTimestamp != null) {
+                                    newOffsets.put(tp, new OffsetAndMetadata(offsetAndTimestamp.offset()));
+                                } else {
+                                    // 如果指定时间戳没有找到对应的偏移量，使用最早的偏移量
+                                    Map<TopicPartition, Long> beginningOffsets = consumer.beginningOffsets(Collections.singleton(tp));
+                                    newOffsets.put(tp, new OffsetAndMetadata(beginningOffsets.get(tp)));
+                                }
                             }
                         }
                         break;

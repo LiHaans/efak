@@ -130,6 +130,14 @@ public class KafkaStoragePlugin {
 
     /** 应用 SASL 身份验证设置 */
     private void applySaslConfig(Properties props, KafkaClientInfo clientInfo) {
+        // 检查必要的 SASL 配置是否存在
+        if (StrUtil.isBlank(clientInfo.getSaslProtocol()) || 
+            StrUtil.isBlank(clientInfo.getSaslMechanism()) || 
+            StrUtil.isBlank(clientInfo.getSaslJaasConfig())) {
+            log.warn("SASL 配置不完整，跳过 SASL 配置应用。集群: {}", clientInfo.getClusterId());
+            return;
+        }
+        
         props.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, clientInfo.getSaslProtocol());
 
         if (StrUtil.isNotBlank(clientInfo.getSaslClientId())) {
@@ -142,16 +150,34 @@ public class KafkaStoragePlugin {
 
     /** 应用 SSL 加密设置 */
     private void applySslConfig(Properties props, KafkaClientInfo clientInfo) {
+        // 检查必要的 SSL 配置是否存在
+        if (StrUtil.isBlank(clientInfo.getSslProtocol())) {
+            log.warn("SSL 配置不完整，跳过 SSL 配置应用。集群: {}", clientInfo.getClusterId());
+            return;
+        }
+        
         props.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, clientInfo.getSslProtocol());
 
-        props.put(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG, clientInfo.getSslTruststoreLocation());
-        props.put(SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG, clientInfo.getSslTruststorePassword());
-
-        props.put(SslConfigs.SSL_KEYSTORE_LOCATION_CONFIG, clientInfo.getSslKeystoreLocation());
-        props.put(SslConfigs.SSL_KEYSTORE_PASSWORD_CONFIG, clientInfo.getSslKeystorePassword());
-        props.put(SslConfigs.SSL_KEY_PASSWORD_CONFIG, clientInfo.getSslKeyPassword());
-
-        props.put(SslConfigs.SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, clientInfo.getSslAlgorithm());
+        if (StrUtil.isNotBlank(clientInfo.getSslTruststoreLocation())) {
+            props.put(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG, clientInfo.getSslTruststoreLocation());
+        }
+        if (StrUtil.isNotBlank(clientInfo.getSslTruststorePassword())) {
+            props.put(SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG, clientInfo.getSslTruststorePassword());
+        }
+        
+        if (StrUtil.isNotBlank(clientInfo.getSslKeystoreLocation())) {
+            props.put(SslConfigs.SSL_KEYSTORE_LOCATION_CONFIG, clientInfo.getSslKeystoreLocation());
+        }
+        if (StrUtil.isNotBlank(clientInfo.getSslKeystorePassword())) {
+            props.put(SslConfigs.SSL_KEYSTORE_PASSWORD_CONFIG, clientInfo.getSslKeystorePassword());
+        }
+        if (StrUtil.isNotBlank(clientInfo.getSslKeyPassword())) {
+            props.put(SslConfigs.SSL_KEY_PASSWORD_CONFIG, clientInfo.getSslKeyPassword());
+        }
+        
+        if (StrUtil.isNotBlank(clientInfo.getSslAlgorithm())) {
+            props.put(SslConfigs.SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, clientInfo.getSslAlgorithm());
+        }
     }
 
     /* ======================= RESOURCE MANAGEMENT ======================= */

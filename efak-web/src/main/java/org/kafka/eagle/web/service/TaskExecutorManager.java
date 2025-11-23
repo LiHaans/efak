@@ -10,6 +10,7 @@ import org.kafka.eagle.core.api.KafkaSchemaFactory;
 import org.kafka.eagle.core.api.KafkaStoragePlugin;
 import org.kafka.eagle.core.constant.JmxMetricsConst;
 import org.kafka.eagle.core.constant.MBeanMetricsConst;
+import org.kafka.eagle.core.retry.DeadlockRetryer;
 import org.kafka.eagle.dto.alert.AlertChannel;
 import org.kafka.eagle.dto.alert.AlertInfo;
 import org.kafka.eagle.dto.alert.AlertTypeConfig;
@@ -42,8 +43,10 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import jakarta.annotation.PreDestroy;
 
 /**
  * <p>
@@ -95,6 +98,53 @@ public class TaskExecutorManager {
 
     @Value("${efak.data-retention-days:30}")
     private int dataRetentionDays;
+
+    // 主题指标采集线程池
+    private ExecutorService topicMetricsExecutor;
+    
+    // 单个主题任务超时时间（分钟）
+    private static final long TOPIC_TASK_TIMEOUT_MINUTES = 5L;
+
+    /**
+     * 初始化线程池
+     */
+    public TaskExecutorManager() {
+        int poolSize = Math.max(2, Runtime.getRuntime().availableProcessors() * 2);
+        this.topicMetricsExecutor = Executors.newFixedThreadPool(poolSize, new ThreadFactory() {
+            private final AtomicInteger threadNumber = new AtomicInteger(1);
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, "topic-metrics-" + threadNumber.getAndIncrement());
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+        log.info("[线程池初始化] Topic指标采集线程池已创建，线程数: {}", poolSize);
+    }
+
+    /**
+     * 优雅关闭线程池
+     */
+    @PreDestroy
+    public void shutdown() {
+        if (topicMetricsExecutor != null && !topicMetricsExecutor.isShutdown()) {
+            log.info("[线程池关闭] 开始关闭Topic指标采集线程池");
+            long startTime = System.currentTimeMillis();
+            topicMetricsExecutor.shutdown();
+            try {
+                if (!topicMetricsExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    log.warn("[线程池关闭] 等待30秒后仍有任务未完成，强制关闭");
+                    topicMetricsExecutor.shutdownNow();
+                }
+                log.info("[线程池关闭] Topic指标采集线程池已关闭，耗时{}ms", 
+                    System.currentTimeMillis() - startTime);
+            } catch (InterruptedException e) {
+                log.error("[线程池关闭] 关闭过程被中断", e);
+                topicMetricsExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
 
     /**
      * 执行任务
@@ -212,7 +262,9 @@ public class TaskExecutorManager {
             }
 
             // 3. 使用分布式任务协调器进行分片
+            log.info("[Topic监控] 步骤3: 开始分片，总主题数: {}", allTopicNames.size());
             List<String> assignedTopicNames = taskCoordinator.shardTopics(allTopicNames);
+            log.info("[Topic监控] 步骤3完成: 当前节点分配到{}个主题", assignedTopicNames.size());
 
             if (assignedTopicNames.isEmpty()) {
                 result.setSuccess(true);
@@ -221,8 +273,8 @@ public class TaskExecutorManager {
             }
 
             // 4. 获取分配给当前节点的主题详细统计信息
-            List<TopicDetailedStats> topicStats = new ArrayList<>();
-            int totalPartitions = 0;
+            List<TopicDetailedStats> topicStats = Collections.synchronizedList(new ArrayList<>());
+            AtomicInteger totalPartitions = new AtomicInteger(0);
 
             // 按集群分组处理主题，实现批量获取
             Map<String, List<String>> clusterTopicsMap = new HashMap<>();
@@ -234,9 +286,11 @@ public class TaskExecutorManager {
             }
 
             // 按集群批量获取主题元数据
+            log.info("[Topic监控] 步骤4: 开始获取主题元数据，共{}个集群", clusterTopicsMap.size());
             for (Map.Entry<String, List<String>> entry : clusterTopicsMap.entrySet()) {
                 String clusterId = entry.getKey();
                 List<String> clusterTopicNames = entry.getValue();
+                log.info("[Topic监控] 步骤4.1: 处理集群{}，主题数: {}", clusterId, clusterTopicNames.size());
 
                 try {
                     // 获取集群信息
@@ -263,41 +317,73 @@ public class TaskExecutorManager {
                     // 使用批量方法获取该集群所有主题的元数据，传递broker信息用于计算
                     KafkaSchemaFactory ksf = new KafkaSchemaFactory(new KafkaStoragePlugin());
                     Set<String> topicsSet = new HashSet<>(clusterTopicNames);
+                    log.info("[Topic监控] 步骤4.2: 集群{}开始调用getTopicMetaData，主题数: {}", clusterId, topicsSet.size());
+                    long metadataStart = System.currentTimeMillis();
                     Map<String, TopicDetailedStats> topicMetadataMap = ksf.getTopicMetaData(kafkaClientInfo, topicsSet, brokers);
+                    log.info("[Topic监控] 步骤4.3: 集群{}获取元数据完成，返回{}个主题，耗时{}ms", 
+                        clusterId, topicMetadataMap.size(), System.currentTimeMillis() - metadataStart);
 
-                    // 处理每个主题的元数据
+                    // 统计JMX可用性
+                    int jmxEnabledCount = countJmxEnabled(brokers);
+                    log.info("[Topic监控] 步骤4.4: 集群{} JMX可用性 - 总broker数: {}, 支持JMX: {}", 
+                        clusterId, brokers.size(), jmxEnabledCount);
+
+                    // 并发处理每个主题的元数据
+                    List<CompletableFuture<Void>> futures = new ArrayList<>();
+                    AtomicInteger successCount = new AtomicInteger(0);
+                    AtomicInteger failureCount = new AtomicInteger(0);
+                    AtomicInteger timeoutCount = new AtomicInteger(0);
+                    long batchStartTime = System.currentTimeMillis();
+
                     for (String topicName : clusterTopicNames) {
                         TopicDetailedStats topicMetadata = topicMetadataMap.get(topicName);
 
                         if (topicMetadata == null) {
                             log.warn("未能获取主题 {} 的元数据，跳过", topicName);
+                            failureCount.incrementAndGet();
                             continue;
                         }
 
-                        // 设置额外属性
-                        topicMetadata.setClusterId(clusterId);
-
-                        // 收集额外的主题指标数据
-                        try {
-                            TopicMetrics topicMetrics = collectTopicMetrics(kafkaClientInfo, brokers, topicName, ksf);
-                            if (topicMetrics != null) {
-                                // 保存主题指标到数据库
-                                saveTopicMetrics(topicMetrics);
+                        // 为每个主题创建并发任务
+                        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                            processTopic(clusterId, topicName, topicMetadata, kafkaClientInfo, brokers, ksf, topicStats, totalPartitions);
+                        }, topicMetricsExecutor)
+                        .orTimeout(TOPIC_TASK_TIMEOUT_MINUTES, TimeUnit.MINUTES)
+                        .handle((r, ex) -> {
+                            if (ex != null) {
+                                if (ex instanceof TimeoutException) {
+                                    timeoutCount.incrementAndGet();
+                                    log.error("[Topic监控] 主题 {} 采集超时({}分钟)", topicName, TOPIC_TASK_TIMEOUT_MINUTES);
+                                } else {
+                                    failureCount.incrementAndGet();
+                                    log.error("[Topic监控] 主题 {} 采集失败: {}", topicName, ex.getMessage());
+                                }
+                            } else {
+                                successCount.incrementAndGet();
                             }
-                            List<TopicInstantMetrics> topicInstantMetrics = collectTopicInstantMetrics(kafkaClientInfo, brokers, topicName, ksf);
-                            if (topicInstantMetrics.size() > 0) {
-                                // 保存主题即时指标
-                                topicInstantMetricsMapper.batchUpsertMetrics(topicInstantMetrics);
-                            }
+                            return null;
+                        });
 
-                        } catch (Exception e) {
-                            log.error("收集主题 {} 指标数据失败: {}", topicName, e.getMessage(), e);
-                        }
-
-                        topicStats.add(topicMetadata);
-                        totalPartitions += topicMetadata.getPartitionCount();
-
+                        futures.add(future);
                     }
+
+                    // 等待所有任务完成
+                    log.info("[Topic监控] 步骤4.5: 集群{}开始并发采集{}个主题的指标数据，线程池大小: {}", 
+                        clusterId, futures.size(), ((ThreadPoolExecutor) topicMetricsExecutor).getPoolSize());
+
+                    try {
+                        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                            .get(TOPIC_TASK_TIMEOUT_MINUTES + 1, TimeUnit.MINUTES);
+                    } catch (TimeoutException e) {
+                        log.error("[Topic监控] 集群{}批次采集超时，部分数据可能未完成", clusterId);
+                    } catch (Exception e) {
+                        log.error("[Topic监控] 集群{}批次采集异常: {}", clusterId, e.getMessage(), e);
+                    }
+
+                    long batchElapsed = System.currentTimeMillis() - batchStartTime;
+                    log.info("[Topic监控] 步骤4.6: 集群{}批次采集完成 - 总数: {}, 成功: {}, 失败: {}, 超时: {}, 总耗时: {}ms, 平均: {}ms",
+                        clusterId, clusterTopicNames.size(), successCount.get(), failureCount.get(), 
+                        timeoutCount.get(), batchElapsed, clusterTopicNames.isEmpty() ? 0 : batchElapsed / clusterTopicNames.size());
 
                 } catch (Exception e) {
                     log.error("批量获取集群 {} 的主题详细信息失败: {}", clusterId, e.getMessage(), e);
@@ -305,13 +391,15 @@ public class TaskExecutorManager {
             }
 
             // 5. 将统计信息保存到数据库
+            log.info("[Topic监控] 步骤5: 开始保存主题数据到数据库，共{}个主题", topicStats.size());
             int savedCount = saveTopicStatsToDatabase(topicStats);
+            log.info("[Topic监控] 步骤5完成: 成功保存{}个主题到数据库", savedCount);
 
             // 6. 构建返回数据
             Map<String, Object> data = new HashMap<>();
             data.put("totalTopicCount", allTopicNames.size());
             data.put("assignedTopicCount", assignedTopicNames.size());
-            data.put("partitionCount", totalPartitions);
+            data.put("partitionCount", totalPartitions.get());
             data.put("savedToDatabase", savedCount);
             data.put("clusterCount", clusters.size());
 
@@ -319,14 +407,14 @@ public class TaskExecutorManager {
             Map<String, Object> shardResult = new HashMap<>();
             shardResult.put("nodeId", taskCoordinator.getCurrentNodeId());
             shardResult.put("assignedTopicCount", assignedTopicNames.size());
-            shardResult.put("partitionCount", totalPartitions);
+            shardResult.put("partitionCount", totalPartitions.get());
             shardResult.put("processedTopicNames", assignedTopicNames);
             shardResult.put("savedToDatabase", savedCount);
             taskCoordinator.saveShardResult("topic_monitor", shardResult);
 
             result.setSuccess(true);
             result.setResult(String.format("主题监控分片完成，总共%d个主题，当前节点处理%d个主题，%d个分区，保存%d个主题到数据库",
-                    allTopicNames.size(), assignedTopicNames.size(), totalPartitions, savedCount));
+                    allTopicNames.size(), assignedTopicNames.size(), totalPartitions.get(), savedCount));
             result.setData(data);
 
         } catch (Exception e) {
@@ -1792,6 +1880,80 @@ public class TaskExecutorManager {
     }
 
     /**
+     * 检查是否有任何broker支持JMX
+     */
+    private boolean hasAnyJmx(List<BrokerInfo> brokers) {
+        if (brokers == null || brokers.isEmpty()) {
+            return false;
+        }
+        return brokers.stream()
+                .anyMatch(b -> b.getJmxPort() != null && b.getJmxPort() > 0);
+    }
+
+    /**
+     * 统计支持JMX的broker数量
+     */
+    private int countJmxEnabled(List<BrokerInfo> brokers) {
+        if (brokers == null || brokers.isEmpty()) {
+            return 0;
+        }
+        return (int) brokers.stream()
+                .filter(b -> b.getJmxPort() != null && b.getJmxPort() > 0)
+                .count();
+    }
+
+    /**
+     * 处理单个主题的指标采集与持久化
+     */
+    private void processTopic(String clusterId, String topicName, TopicDetailedStats topicMetadata,
+                              KafkaClientInfo kafkaClientInfo, List<BrokerInfo> brokers, 
+                              KafkaSchemaFactory ksf, List<TopicDetailedStats> topicStats, 
+                              AtomicInteger totalPartitions) {
+        long topicStartTime = System.currentTimeMillis();
+        try {
+            // 设置额外属性
+            topicMetadata.setClusterId(clusterId);
+
+            // 收集额外的主题指标数据
+            TopicMetrics topicMetrics = collectTopicMetrics(kafkaClientInfo, brokers, topicName, ksf);
+            if (topicMetrics != null) {
+                // 保存主题指标到数据库
+                saveTopicMetrics(topicMetrics);
+            }
+            
+            List<TopicInstantMetrics> topicInstantMetrics = collectTopicInstantMetrics(kafkaClientInfo, brokers, topicName, ksf);
+            if (topicInstantMetrics.size() > 0) {
+                // 对批量数据按唯一键排序,避免死锁(所有线程使用统一加锁顺序)
+                sortMetricsByUniqueKey(topicInstantMetrics);
+                
+                // 使用死锁重试机制保存主题即时指标
+                try {
+                    DeadlockRetryer.execute(() -> {
+                        topicInstantMetricsMapper.batchUpsertMetrics(topicInstantMetrics);
+                        return null;
+                    });
+                } catch (Exception e) {
+                    log.error("[Topic监控] 主题 {} 即时指标入库失败(重试后仍失败): clusterId={}, metricCount={}, error={}", 
+                        topicName, clusterId, topicInstantMetrics.size(), e.getMessage());
+                    // 不抛出异常,避免影响其他主题的采集
+                }
+            }
+
+            // 添加到统计列表
+            topicStats.add(topicMetadata);
+            totalPartitions.addAndGet(topicMetadata.getPartitionCount());
+            
+            // 记录耗时较长的主题
+            long elapsed = System.currentTimeMillis() - topicStartTime;
+            if (elapsed > 10000) {
+                log.warn("[Topic监控] 主题 {} 采集耗时过长: {}ms", topicName, elapsed);
+            }
+        } catch (Exception e) {
+            log.error("[Topic监控] 收集主题 {} (集群: {}) 指标数据失败: {}", topicName, clusterId, e.getMessage(), e);
+        }
+    }
+
+    /**
      * 收集主题指标数据
      */
     private TopicMetrics collectTopicMetrics(KafkaClientInfo kafkaClientInfo, List<BrokerInfo> brokers, String topicName, KafkaSchemaFactory ksf) {
@@ -1802,12 +1964,21 @@ public class TaskExecutorManager {
         metrics.setCollectTime(collectTime);
         metrics.setCreateTime(collectTime);
 
+        // JMX可用性检查
+        boolean jmxAvailable = hasAnyJmx(brokers);
+        if (!jmxAvailable) {
+            log.debug("[JMX降级] 主题 {} 所在集群无可用JMX，将跳过JMX指标采集", topicName);
+        }
+
         try {
-            // 1. 获取topic容量（使用已实现的方法）
-            Long capacity = ksf.getTopicRecordCapacityNum(kafkaClientInfo, brokers, topicName);
+            // 1. 获取topic容量（使用已实现的方法）- 注意：此方法内部依赖JMX
+            Long capacity = 0L;
+            if (jmxAvailable) {
+                capacity = ksf.getTopicRecordCapacityNum(kafkaClientInfo, brokers, topicName);
+            }
             metrics.setCapacity(capacity != null ? capacity : 0L);
 
-            // 2. 获取topic消息记录数
+            // 2. 获取topic消息记录数（使用Kafka客户端API，不依赖JMX）
             Long recordCount = ksf.getTotalTopicLogSize(kafkaClientInfo, topicName);
             metrics.setRecordCount(recordCount != null ? recordCount : 0L);
 
@@ -1833,9 +2004,14 @@ public class TaskExecutorManager {
             metrics.setRecordCountDiff(recordCountDiff);
             metrics.setCapacityDiff(capacityDiff);
 
-            // 4. 获取写入和读取速度
-            BigDecimal writeSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_IN_PER_SEC_TOPIC.key());
-            BigDecimal readSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_OUT_PER_SEC_TOPIC.key());
+            // 4. 获取写入和读取速度（仅当JMX可用时）
+            BigDecimal writeSpeed = BigDecimal.ZERO;
+            BigDecimal readSpeed = BigDecimal.ZERO;
+            
+            if (jmxAvailable) {
+                writeSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_IN_PER_SEC_TOPIC.key());
+                readSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_OUT_PER_SEC_TOPIC.key());
+            }
 
             metrics.setWriteSpeed(writeSpeed != null ? writeSpeed : BigDecimal.ZERO);
             metrics.setReadSpeed(readSpeed != null ? readSpeed : BigDecimal.ZERO);
@@ -1855,9 +2031,18 @@ public class TaskExecutorManager {
         List<TopicInstantMetrics> metricsList = new ArrayList<>();
         LocalDateTime collectTime = LocalDateTime.now();
 
+        // JMX可用性检查
+        boolean jmxAvailable = hasAnyJmx(brokers);
+        if (!jmxAvailable) {
+            log.debug("[JMX降级] 主题 {} 所在集群无可用JMX，将跳过JMX指标采集", topicName);
+        }
+
         try {
-            // 1. 获取topic容量
-            Long capacity = ksf.getTopicRecordCapacityNum(kafkaClientInfo, brokers, topicName);
+            // 1. 获取topic容量（仅当JMX可用时）
+            Long capacity = 0L;
+            if (jmxAvailable) {
+                capacity = ksf.getTopicRecordCapacityNum(kafkaClientInfo, brokers, topicName);
+            }
             TopicInstantMetrics capacityMetrics = new TopicInstantMetrics();
             capacityMetrics.setTopicName(topicName);
             capacityMetrics.setClusterId(kafkaClientInfo.getClusterId());
@@ -1867,7 +2052,7 @@ public class TaskExecutorManager {
             capacityMetrics.setCreateTime(collectTime);
             metricsList.add(capacityMetrics);
 
-            // 2. 获取topic消息记录数
+            // 2. 获取topic消息记录数（使用Kafka客户端API，不依赖JMX）
             Long recordCount = ksf.getTotalActualTopicLogSize(kafkaClientInfo, topicName);
             TopicInstantMetrics logsizeMetrics = new TopicInstantMetrics();
             logsizeMetrics.setTopicName(topicName);
@@ -1878,8 +2063,11 @@ public class TaskExecutorManager {
             logsizeMetrics.setCreateTime(collectTime);
             metricsList.add(logsizeMetrics);
 
-            // 3. 获取写入速度
-            BigDecimal writeSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_IN_PER_SEC_TOPIC.key());
+            // 3. 获取写入速度（仅当JMX可用时）
+            BigDecimal writeSpeed = BigDecimal.ZERO;
+            if (jmxAvailable) {
+                writeSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_IN_PER_SEC_TOPIC.key());
+            }
             TopicInstantMetrics byteInMetrics = new TopicInstantMetrics();
             byteInMetrics.setTopicName(topicName);
             byteInMetrics.setClusterId(kafkaClientInfo.getClusterId());
@@ -1889,8 +2077,11 @@ public class TaskExecutorManager {
             byteInMetrics.setCreateTime(collectTime);
             metricsList.add(byteInMetrics);
 
-            // 4. 获取读取速度
-            BigDecimal readSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_OUT_PER_SEC_TOPIC.key());
+            // 4. 获取读取速度（仅当JMX可用时）
+            BigDecimal readSpeed = BigDecimal.ZERO;
+            if (jmxAvailable) {
+                readSpeed = getTopicJmxMetric(brokers, topicName, JmxMetricsConst.Server.BYTES_OUT_PER_SEC_TOPIC.key());
+            }
             TopicInstantMetrics byteOutMetrics = new TopicInstantMetrics();
             byteOutMetrics.setTopicName(topicName);
             byteOutMetrics.setClusterId(kafkaClientInfo.getClusterId());
@@ -1904,6 +2095,50 @@ public class TaskExecutorManager {
             log.error("收集主题 {} 即时指标数据时发生异常: {}", topicName, e.getMessage(), e);
         }
         return metricsList;
+    }
+
+    /**
+     * 对指标列表按唯一键排序,确保所有线程使用相同的加锁顺序
+     * 排序规则: cluster_id ASC, topic_name ASC, metric_type ASC
+     * 这是解决死锁问题的关键措施
+     */
+    private void sortMetricsByUniqueKey(List<TopicInstantMetrics> metrics) {
+        if (metrics == null || metrics.size() <= 1) {
+            return;
+        }
+        
+        metrics.sort((m1, m2) -> {
+            // 1. 先按 cluster_id 排序
+            int clusterCompare = compareStrings(m1.getClusterId(), m2.getClusterId());
+            if (clusterCompare != 0) {
+                return clusterCompare;
+            }
+            
+            // 2. 再按 topic_name 排序
+            int topicCompare = compareStrings(m1.getTopicName(), m2.getTopicName());
+            if (topicCompare != 0) {
+                return topicCompare;
+            }
+            
+            // 3. 最后按 metric_type 排序
+            return compareStrings(m1.getMetricType(), m2.getMetricType());
+        });
+    }
+    
+    /**
+     * 安全的字符串比较,处理 null 值
+     */
+    private int compareStrings(String s1, String s2) {
+        if (s1 == null && s2 == null) {
+            return 0;
+        }
+        if (s1 == null) {
+            return -1;
+        }
+        if (s2 == null) {
+            return 1;
+        }
+        return s1.compareTo(s2);
     }
 
     /**
